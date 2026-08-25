@@ -1,4 +1,4 @@
-import type { AssetRecord } from "./types";
+import type { AssetRecord, JobSettings } from "./types";
 
 const DATABASE = "dummyplug-single-shot-workspace-v2";
 const STORE = "workspace";
@@ -38,6 +38,7 @@ export interface PersistedWorkspace {
   durationSeconds: number;
   generatedPrompt: string;
   promptHistory?: string[];
+  jobSettings?: JobSettings;
 }
 
 function openDatabase() {

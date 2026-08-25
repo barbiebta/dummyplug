@@ -3,13 +3,13 @@
 /* eslint-disable jsx-a11y/media-has-caption -- imported visual and motion references do not include caption tracks */
 /* eslint-disable jsx-a11y/no-static-element-interactions -- the modal backdrop only closes on direct backdrop clicks */
 
-import JSZip from "jszip";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadBrowserWorkspace, saveBrowserWorkspace, type PersistedDirectoryHandle, type PersistedFileHandle, type PersistedWorkspace } from "../../lib/browser-workspace";
+import { DEFAULT_JOB_SETTINGS, randomSeed, sealJobZip, validateJobSettings, validateVideoTrim } from "../../lib/job-bundle";
 import { makeReferenceSidecar, readReferenceSidecar, sidecarMatchKey, sidecarName } from "../../lib/reference-sidecar";
 import { compileAttachments, makeDemoAnalysis, validateSingleShotPrompt } from "../../lib/single-h3";
 import { DEFAULT_PROMPT_TEMPLATES, EXPOSED_PROMPT_TEMPLATES, type PromptTemplateId, type PromptTemplateMap } from "../../lib/single-prompts";
-import type { AssetKind, AssetRecord, AssetRole, ModelSettings, PreparedReference, ReferenceUse } from "../../lib/types";
+import type { AssetKind, AssetRecord, AssetRole, JobSettings, ModelSettings, PreparedReference, ReferenceUse } from "../../lib/types";
 
 const DEFAULT_SETTINGS: ModelSettings = {
   provider: "openrouter",
@@ -85,14 +85,17 @@ function kindFor(file: File): AssetKind | null {
   return null;
 }
 
+function mimeFor(file: File, kind: AssetKind) {
+  if (file.type) return file.type;
+  const extension = file.name.toLocaleLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || "";
+  const known: Record<string, string> = { mov: "video/quicktime", mp4: "video/mp4", m4v: "video/x-m4v", webm: "video/webm", mkv: "video/x-matroska", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", wav: "audio/wav", mp3: "audio/mpeg", m4a: "audio/mp4", flac: "audio/flac" };
+  return known[extension] || `${kind}/unknown`;
+}
+
 function humanBytes(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 ** 2).toFixed(1)} MB`;
-}
-
-function safeName(name: string) {
-  return name.replace(/[^a-z0-9._-]+/gi, "_");
 }
 
 function fileToDataUrl(file: Blob) {
@@ -102,6 +105,33 @@ function fileToDataUrl(file: Blob) {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+async function inspectSource(file: File, kind: AssetKind) {
+  const url = URL.createObjectURL(file);
+  try {
+    if (kind === "image") {
+      const image = new Image();
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error(`Could not inspect ${file.name}.`));
+        image.src = url;
+      });
+      return { sourceWidth: image.naturalWidth, sourceHeight: image.naturalHeight };
+    }
+    const media = document.createElement(kind === "video" ? "video" : "audio");
+    media.preload = "metadata";
+    media.src = url;
+    await new Promise<void>((resolve, reject) => {
+      media.onloadedmetadata = () => resolve();
+      media.onerror = () => reject(new Error(`Could not inspect ${file.name}.`));
+    });
+    const video = kind === "video" ? media as HTMLVideoElement : null;
+    return {
+      ...(video ? { sourceWidth: video.videoWidth, sourceHeight: video.videoHeight } : {}),
+      ...(Number.isFinite(media.duration) ? { sourceDuration: media.duration } : {}),
+    };
+  } finally { URL.revokeObjectURL(url); }
 }
 
 async function resizeImage(file: File, max = 1280) {
@@ -155,6 +185,7 @@ export function SingleShotApp() {
   const [selectedAssetId, setSelectedAssetId] = useState("");
   const [simplePrompt, setSimplePrompt] = useState("");
   const [durationSeconds, setDurationSeconds] = useState(10);
+  const [jobSettings, setJobSettings] = useState<JobSettings>(DEFAULT_JOB_SETTINGS);
   const [generatedPrompt, setGeneratedPrompt] = useState("");
   const [promptHistory, setPromptHistory] = useState<string[]>([]);
   const [settings, setSettings] = useState<ModelSettings>(DEFAULT_SETTINGS);
@@ -167,6 +198,8 @@ export function SingleShotApp() {
   const [busy, setBusy] = useState<"analyze" | "generate" | "export" | "test" | null>(null);
   const [message, setMessage] = useState("Add assets, tag what they are sources of, then select references for one continuous take.");
   const [dragging, setDragging] = useState(false);
+  const [assetFilterKind, setAssetFilterKind] = useState<"all" | AssetKind>("all");
+  const [assetFilterText, setAssetFilterText] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileStore = useRef(new Map<string, File>());
@@ -237,7 +270,8 @@ export function SingleShotApp() {
         setAssets(restored);
         setSelectedAssetId(saved.selectedAssetId || restored[0]?.id || "");
         setSimplePrompt(saved.simplePrompt || "");
-        setDurationSeconds(Math.max(3, Math.min(10, saved.durationSeconds || 10)));
+        setDurationSeconds(Math.max(1, Math.min(20, saved.durationSeconds || 10)));
+        setJobSettings({ ...DEFAULT_JOB_SETTINGS, ...(saved.jobSettings || {}) });
         setGeneratedPrompt(saved.generatedPrompt || "");
         setPromptHistory((saved.promptHistory || []).filter(Boolean).slice(0, 5));
         if (restored.length) setMessage(`Restored ${restored.length} asset${restored.length === 1 ? "" : "s"} from the new single-shot workspace.`);
@@ -277,19 +311,26 @@ export function SingleShotApp() {
         durationSeconds,
         generatedPrompt,
         promptHistory,
+        jobSettings,
       };
       const light: PersistedWorkspace = { ...persisted, metadataDirectory: undefined, assets: persisted.assets.map(({ record }) => ({ record })) };
       try { localStorage.setItem("dummyplug.single.v2.workspace.light", JSON.stringify(light)); } catch { /* IndexedDB is primary */ }
       void saveBrowserWorkspace(persisted).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [assets, durationSeconds, generatedPrompt, promptHistory, selectedAssetId, simplePrompt, storageReady]);
+  }, [assets, durationSeconds, generatedPrompt, jobSettings, promptHistory, selectedAssetId, simplePrompt, storageReady]);
 
   const selectedAsset = assets.find((asset) => asset.id === selectedAssetId) || assets[0];
   const chosenAssets = assets.filter((asset) => asset.selected);
   const compiled = useMemo(() => compileAttachments(chosenAssets), [chosenAssets]);
   const validation = generatedPrompt ? validateSingleShotPrompt(generatedPrompt, compiled.attachments, compiled.subjects) : null;
   const analyzedCount = assets.filter((asset) => asset.analysis).length;
+  const visibleAssets = assets.filter((asset) => {
+    if (assetFilterKind !== "all" && asset.kind !== assetFilterKind) return false;
+    const query = assetFilterText.trim().toLocaleLowerCase();
+    if (!query) return true;
+    return [asset.name, asset.canonicalName, asset.role, asset.referenceUse, asset.sourceOf, asset.note, asset.analysis ? JSON.stringify(asset.analysis) : ""].filter(Boolean).join(" ").toLocaleLowerCase().includes(query);
+  });
 
   async function postProvider(body: Record<string, unknown>) {
     if (settings.provider === "openrouter" && !settings.apiKey.trim()) {
@@ -406,6 +447,8 @@ export function SingleShotApp() {
       const sidecarFile = sidecars.get(sidecarMatchKey(relativePath));
       const imported = sidecarFile ? readReferenceSidecar(await sidecarFile.text(), id) : metadataDirectoryStore.current ? await readCachedSidecar(metadataDirectoryStore.current, file, id) : null;
       if (imported) importedCount += 1;
+      let sourceMetadata: Pick<AssetRecord, "sourceWidth" | "sourceHeight" | "sourceDuration"> = {};
+      try { sourceMetadata = await inspectSource(file, kind); } catch { /* retain asset even when Chrome cannot decode its codec */ }
       records.push({
         ...(reusable || {}),
         id,
@@ -413,7 +456,10 @@ export function SingleShotApp() {
         kind,
         size: file.size,
         lastModified: file.lastModified,
-        mimeType: file.type,
+        mimeType: mimeFor(file, kind),
+        ...sourceMetadata,
+        trimStart: kind === "video" ? reusable?.trimStart ?? 0 : undefined,
+        trimEnd: kind === "video" ? reusable?.trimEnd ?? sourceMetadata.sourceDuration : undefined,
         previewUrl: URL.createObjectURL(file),
         selected: reusable?.selected ?? false,
         canonicalName: imported?.canonicalName ?? reusable?.canonicalName ?? "",
@@ -425,7 +471,11 @@ export function SingleShotApp() {
         missingFile: false,
       });
     }
-    setAssets((current) => [...current.filter((asset) => !records.some((record) => record.id === asset.id)), ...records]);
+    setAssets((current) => {
+      const replacements = new Map(records.map((record) => [record.id, record]));
+      const existingIds = new Set(current.map((asset) => asset.id));
+      return [...current.map((asset) => replacements.get(asset.id) || asset), ...records.filter((record) => !existingIds.has(record.id))];
+    });
     if (!selectedAssetId && records[0]) setSelectedAssetId(records[0].id);
     if (records.length) setMessage(`${records.length} asset${records.length === 1 ? "" : "s"} added${importedCount ? `; ${importedCount} matching metadata file${importedCount === 1 ? "" : "s"} loaded` : ""}${unsupported.length ? `; skipped unsupported: ${unsupported.slice(0, 3).join(", ")}${unsupported.length > 3 ? ` +${unsupported.length - 3} more` : ""}` : ""}.`);
     else if (unsupported.length) setMessage(`No supported assets found. Skipped: ${unsupported.slice(0, 3).join(", ")}${unsupported.length > 3 ? ` +${unsupported.length - 3} more` : ""}.`);
@@ -457,6 +507,7 @@ export function SingleShotApp() {
 
   async function reloadSources() {
     const replacements = new Map<string, File>();
+    const sourceMetadata = new Map<string, Pick<AssetRecord, "sourceWidth" | "sourceHeight" | "sourceDuration">>();
     let reloaded = 0;
     for (const asset of assets) {
       const handle = sourceHandleStore.current.get(asset.id);
@@ -466,6 +517,7 @@ export function SingleShotApp() {
         const file = await handle.getFile();
         fileStore.current.set(asset.id, file);
         replacements.set(asset.id, file);
+        try { sourceMetadata.set(asset.id, await inspectSource(file, asset.kind)); } catch { /* retain prior inspection */ }
         reloaded += 1;
       } catch { /* picker fallback below */ }
     }
@@ -474,14 +526,30 @@ export function SingleShotApp() {
       const file = replacements.get(asset.id);
       if (!file) return asset;
       const changed = file.size !== asset.size || (asset.lastModified != null && file.lastModified !== asset.lastModified);
+      const inspected = sourceMetadata.get(asset.id) || {};
       if (asset.previewUrl) URL.revokeObjectURL(asset.previewUrl);
-      return { ...asset, name: file.name, size: file.size, lastModified: file.lastModified, mimeType: file.type, previewUrl: URL.createObjectURL(file), missingFile: false, analysis: changed ? undefined : asset.analysis };
+      return { ...asset, ...inspected, name: file.name, size: file.size, lastModified: file.lastModified, mimeType: mimeFor(file, asset.kind), previewUrl: URL.createObjectURL(file), missingFile: false, analysis: changed ? undefined : asset.analysis, ...(asset.kind === "video" && inspected.sourceDuration != null && (asset.trimEnd == null || changed) ? { trimStart: 0, trimEnd: inspected.sourceDuration } : {}) };
     }));
     setMessage(`Reloaded ${reloaded} source file${reloaded === 1 ? "" : "s"}.`);
   }
 
   function patchAsset(id: string, patch: Partial<AssetRecord>) {
     setAssets((current) => current.map((asset) => asset.id === id ? { ...asset, ...patch } : asset));
+  }
+
+  function moveAsset(id: string, direction: -1 | 1) {
+    setAssets((current) => {
+      const index = current.findIndex((asset) => asset.id === id);
+      const destination = index + direction;
+      if (index < 0 || destination < 0 || destination >= current.length) return current;
+      const next = [...current];
+      [next[index], next[destination]] = [next[destination], next[index]];
+      return next;
+    });
+  }
+
+  function patchJobSettings(patch: Partial<JobSettings>) {
+    setJobSettings((current) => ({ ...current, ...patch }));
   }
 
   async function saveSelectedMetadata() {
@@ -572,31 +640,33 @@ export function SingleShotApp() {
     } finally { setBusy(null); }
   }
 
-  async function exportBundle() {
-    if (!generatedPrompt.trim()) return setMessage("Generate the final prompt before export.");
-    const missing = chosenAssets.filter((asset) => !fileStore.current.has(asset.id));
-    if (missing.length) return setMessage(`${missing.length} selected source file${missing.length === 1 ? " is" : "s are"} not loaded. Reload sources first.`);
+  async function sealBundle() {
+    if (!generatedPrompt.trim()) return setMessage("Generate or write the final prompt before sealing.");
+    const settingErrors = validateJobSettings(jobSettings, durationSeconds);
+    const trimErrors = chosenAssets.map(validateVideoTrim).filter(Boolean);
+    if (settingErrors.length || trimErrors.length) return setMessage([...settingErrors, ...trimErrors].join(" "));
     setBusy("export");
+    setMessage(`Hashing ${chosenAssets.length} reference${chosenAssets.length === 1 ? "" : "s"} and sealing an immutable job…`);
     try {
-      const zip = new JSZip();
-      zip.file("prompt.txt", generatedPrompt);
-      zip.file("request.txt", simplePrompt.trim());
-      zip.file("reference-map.json", JSON.stringify({ subjects: compiled.subjects, attachments: compiled.attachments }, null, 2));
-      zip.file("manifest.json", JSON.stringify({ schema: "dummyplug.single-shot.v1", createdAt: new Date().toISOString(), durationSeconds, provider: { kind: settings.provider, visionModel: settings.visionModel, promptModel: settings.promptModel }, singleContinuousTake: true }, null, 2));
-      for (const attachment of compiled.attachments) {
-        const asset = chosenAssets.find((item) => item.id === attachment.assetId)!;
-        zip.file(`assets/${attachment.label.replace(/[<>]/g, "").replace(/\s+/g, "-").toLowerCase()}__${safeName(asset.name)}`, fileStore.current.get(asset.id)!);
-        zip.file(`metadata/${asset.id}.json`, JSON.stringify(makeReferenceSidecar(asset, settings), null, 2));
-      }
-      const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      const result = await sealJobZip({
+        assets: chosenAssets,
+        files: new Map(chosenAssets.flatMap((asset) => { const file = fileStore.current.get(asset.id); return file ? [[asset.id, file] as const] : []; })),
+        sidecars: new Map(chosenAssets.map((asset) => [asset.id, JSON.stringify(makeReferenceSidecar(asset, settings), null, 2)])),
+        prompt: generatedPrompt,
+        request: simplePrompt,
+        duration: durationSeconds,
+        settings: jobSettings,
+        subjects: compiled.subjects,
+      });
+      const blob = new Blob([result.bytes.slice().buffer], { type: "application/zip" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `dummyplug-single-shot-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.zip`;
+      anchor.download = `${result.jobId}.dummyjob.zip`;
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      setMessage(`Exported ${chosenAssets.length} selected asset${chosenAssets.length === 1 ? "" : "s"} with prompt.txt and metadata.`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : "Export failed."); }
+      setMessage(`Sealed ${result.jobId}.dummyjob.zip with ${chosenAssets.length} hashed reference${chosenAssets.length === 1 ? "" : "s"}.`);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not seal job."); }
     finally { setBusy(null); }
   }
 
@@ -639,16 +709,18 @@ export function SingleShotApp() {
             <button className="drop-picker" onClick={() => void pickReferenceFiles()}><strong>add assets + matching json</strong><span>drop or choose files</span></button>
           </div>
           <div className="source-buttons"><button className="secondary folder-button" onClick={() => void pickReferenceFolder()}>load folder</button><button className="secondary folder-button" disabled={!assets.length} onClick={() => void reloadSources()}>reload sources</button><button className="secondary folder-button analysis-folder-button" onClick={() => void chooseMetadataDirectory()}>{metadataDirectoryName ? `metadata · ${metadataDirectoryName}` : "choose metadata folder"}</button></div>
+          <div className="asset-filters"><input value={assetFilterText} onChange={(event) => setAssetFilterText(event.target.value)} placeholder="filter filename or metadata" aria-label="Filter assets by filename or metadata" /><select value={assetFilterKind} onChange={(event) => setAssetFilterKind(event.target.value as "all" | AssetKind)} aria-label="Filter assets by type"><option value="all">all types</option><option value="image">images</option><option value="video">videos</option><option value="audio">audio</option></select></div>
           <div className="asset-database">
-            {assets.map((asset, index) => <article key={asset.id} className={`db-row ${selectedAsset?.id === asset.id ? "active" : ""}`}>
-              <label className="asset-check" title="Include in the next prompt and zip"><input type="checkbox" checked={asset.selected} onClick={(event) => event.stopPropagation()} onChange={(event) => patchAsset(asset.id, { selected: event.target.checked })} /><span>{asset.selected ? "✓" : ""}</span></label>
+            {visibleAssets.map((asset) => { const index = assets.findIndex((candidate) => candidate.id === asset.id); return <article key={asset.id} className={`db-row ${selectedAsset?.id === asset.id ? "active" : ""}`}>
+              <button type="button" className="asset-check" title="Include in the current job" aria-pressed={asset.selected} onClick={(event) => { event.stopPropagation(); patchAsset(asset.id, { selected: !asset.selected }); }}><span>{asset.selected ? "✓" : ""}</span></button>
               <button className="db-select" onClick={() => setSelectedAssetId(asset.id)}>
               <div className="db-thumb">{asset.kind === "image" && asset.previewUrl ? <img src={asset.previewUrl} alt="" /> : asset.kind === "video" && asset.previewUrl ? <video src={asset.previewUrl} muted /> : <span>{asset.kind === "audio" ? "♫" : "?"}</span>}<b>{index + 1}</b></div>
               <div className="db-copy"><strong>{asset.canonicalName || asset.name}</strong><span>{asset.role} · {asset.referenceUse} · {asset.analysis ? "vision saved" : "not analyzed"}</span><p>{asset.sourceOf || asset.note || "no source-of authority yet"}</p></div>
               </button>
+              <div className="row-order"><button type="button" disabled={index === 0} onClick={(event) => { event.stopPropagation(); moveAsset(asset.id, -1); }} aria-label={`Move ${asset.name} earlier`}>↑</button><button type="button" disabled={index === assets.length - 1} onClick={(event) => { event.stopPropagation(); moveAsset(asset.id, 1); }} aria-label={`Move ${asset.name} later`}>↓</button></div>
               <button className="row-remove" onClick={(event) => { event.stopPropagation(); removeAsset(asset.id); }} aria-label={`Remove ${asset.name}`}>×</button>
-            </article>)}
-            {!assets.length && <p className="empty-copy">Every image, video, and audio file becomes one durable metadata record.</p>}
+            </article>; })}
+            {!assets.length ? <p className="empty-copy">Every image, video, and audio file becomes one durable metadata record.</p> : !visibleAssets.length && <p className="empty-copy">No assets match this filter.</p>}
           </div>
         </aside>
 
@@ -657,6 +729,8 @@ export function SingleShotApp() {
           {selectedAsset ? <>
             <div className="asset-preview">{selectedAsset.kind === "image" && selectedAsset.previewUrl ? <img src={selectedAsset.previewUrl} alt={selectedAsset.canonicalName || selectedAsset.name} /> : selectedAsset.kind === "video" && selectedAsset.previewUrl ? <video src={selectedAsset.previewUrl} controls /> : selectedAsset.kind === "audio" && selectedAsset.previewUrl ? <audio src={selectedAsset.previewUrl} controls /> : <p>source file not loaded</p>}</div>
             <div className="asset-fileline"><strong>{selectedAsset.name}</strong><span>{humanBytes(selectedAsset.size)} · {selectedAsset.id}</span></div>
+            <div className="source-spec"><span>{selectedAsset.sourceWidth && selectedAsset.sourceHeight ? `${selectedAsset.sourceWidth}×${selectedAsset.sourceHeight}` : "dimensions unknown"}</span><span>{selectedAsset.sourceDuration != null ? `${selectedAsset.sourceDuration.toFixed(3)}s` : "duration unknown"}</span><span>{selectedAsset.mimeType}</span></div>
+            {selectedAsset.kind === "video" && <div className="trim-controls"><label><span>trim start</span><input type="number" min={0} step={0.001} value={selectedAsset.trimStart ?? 0} onChange={(event) => patchAsset(selectedAsset.id, { trimStart: Number(event.target.value) })} /></label><label><span>trim end</span><input type="number" min={0.001} step={0.001} value={selectedAsset.trimEnd ?? selectedAsset.sourceDuration ?? ""} onChange={(event) => patchAsset(selectedAsset.id, { trimEnd: Number(event.target.value) })} placeholder="seconds" /></label><button type="button" className="secondary" disabled={selectedAsset.sourceDuration == null} onClick={() => patchAsset(selectedAsset.id, { trimStart: 0, trimEnd: selectedAsset.sourceDuration })}>whole source</button>{validateVideoTrim(selectedAsset) && <p>{validateVideoTrim(selectedAsset)}</p>}</div>}
             <label className="meta-field"><span>canonical name</span><input value={selectedAsset.canonicalName} onChange={(event) => patchAsset(selectedAsset.id, { canonicalName: event.target.value })} onBlur={() => void saveSelectedMetadata()} placeholder="Rabbit" /></label>
             <label className="meta-field"><span>role</span><select value={selectedAsset.role} onChange={(event) => patchAsset(selectedAsset.id, { role: event.target.value as AssetRole })} onBlur={() => void saveSelectedMetadata()}>{ROLE_OPTIONS.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}</select></label>
             <label className="meta-field"><span>H3 use</span><select value={selectedAsset.referenceUse} onChange={(event) => patchAsset(selectedAsset.id, { referenceUse: event.target.value as ReferenceUse })} onBlur={() => void saveSelectedMetadata()}>{REFERENCE_USE_OPTIONS[selectedAsset.kind].map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><small>Subject sources are cited inside a Subject. Picture and Video entries are created only for the explicit structural uses named here.</small></label>
@@ -670,14 +744,26 @@ export function SingleShotApp() {
         <aside className="panel prompt-panel-single">
           <div className="panel-head"><div><span className="step-index">03</span><h2>one continuous take</h2></div><span className={validation ? validation.valid ? "validation-ok" : "validation-bad" : "validation-pending"}>{validation ? validation.valid ? "single take valid" : "needs repair" : "not generated"}</span></div>
           <label className="simple-prompt"><span>simple prompt</span><textarea value={simplePrompt} onChange={(event) => setSimplePrompt(event.target.value)} placeholder="Rabbit and her friend walk from left to right through the attached landscape." /></label>
-          <div className="duration-row"><label>duration <input type="number" min={3} max={10} value={durationSeconds} onChange={(event) => setDurationSeconds(Math.max(3, Math.min(10, Number(event.target.value) || 10)))} /> seconds</label><strong>one shot · no cuts</strong></div>
+          <div className="duration-row"><label>duration <input type="number" min={1} max={20} value={durationSeconds} onChange={(event) => setDurationSeconds(Math.max(1, Math.min(20, Number(event.target.value) || 10)))} /> seconds</label><strong>one shot · no cuts</strong></div>
           <div className="task-prefix">[{compiled.taskTypes.join(" + ") || "reference generation"}]</div>
           <div className="attachment-list"><div><strong>resolved subjects + reference labels</strong><span>{compiled.subjects.length} · {compiled.attachments.length}</span></div>{compiled.subjects.map((subject) => <p className="subject-map-row" key={subject.label}><b>{subject.label}</b><span>{subject.canonicalName}</span><em>{subject.attachmentLabels.join(" + ")}</em></p>)}{compiled.attachments.map((attachment) => { const asset = assets.find((item) => item.id === attachment.assetId)!; return <p key={attachment.assetId}><b>{attachment.label}</b><span>{attachment.standaloneEntry ? "standalone entry" : "inside Subject only"}</span><em>{asset.sourceOf || asset.role}</em></p>; })}{!compiled.attachments.length && <p className="attachment-empty">Check assets in the library.</p>}</div>
           {compiled.warnings.length > 0 && <div className="warning-box">{compiled.warnings.map((warning) => <p key={warning}>△ {warning}</p>)}</div>}
           <button className="primary generate-single" disabled={Boolean(busy) || !simplePrompt.trim() || !chosenAssets.length} onClick={() => void generatePrompt()}>{busy === "generate" ? "writing one continuous take…" : "generate six-part prompt"}</button>
           {promptHistory.length > 0 && <label className="prompt-history"><span>recent generated versions</span><select value="" onChange={(event) => { const remembered = promptHistory[Number(event.target.value)]; if (remembered) setGeneratedPrompt(remembered); }}><option value="" disabled>restore one of the last {promptHistory.length}</option>{promptHistory.map((prompt, index) => <option value={index} key={`${index}-${prompt.slice(0, 24)}`}>version {index + 1} · {prompt.replace(/\s+/g, " ").slice(0, 52)}</option>)}</select></label>}
           <textarea className="prompt-output single-output" value={generatedPrompt} onChange={(event) => setGeneratedPrompt(event.target.value)} placeholder="The expanded six-part H3 prompt appears here. It will contain exactly one [Shot 1]." spellCheck={false} />
-          <div className="single-actions"><button className="secondary" disabled={!generatedPrompt} onClick={() => void navigator.clipboard.writeText(generatedPrompt).then(() => setMessage("Prompt copied."))}>copy prompt</button><button className="primary" disabled={!generatedPrompt || busy === "export"} onClick={() => void exportBundle()}>{busy === "export" ? "zipping…" : "export selected bundle"}</button></div>
+          <details className="job-controls" open><summary>job seal settings <span>{jobSettings.width}×{jobSettings.height} · {jobSettings.fps} fps</span></summary><div className="preset-row"><button type="button" onClick={() => patchJobSettings({ width: 768, height: 1344 })}>portrait</button><button type="button" onClick={() => patchJobSettings({ width: 1344, height: 768 })}>landscape</button><button type="button" onClick={() => patchJobSettings({ width: 1024, height: 1024 })}>square</button></div><div className="job-control-grid">
+            <label className="wide"><span>job title</span><input value={jobSettings.title} onChange={(event) => patchJobSettings({ title: event.target.value })} placeholder="optional" /></label>
+            <label><span>width</span><input type="number" min={64} max={8192} value={jobSettings.width} onChange={(event) => patchJobSettings({ width: Number(event.target.value) })} /></label><label><span>height</span><input type="number" min={64} max={8192} value={jobSettings.height} onChange={(event) => patchJobSettings({ height: Number(event.target.value) })} /></label>
+            <label><span>fps</span><input type="number" min={1} max={120} value={jobSettings.fps} onChange={(event) => patchJobSettings({ fps: Number(event.target.value) })} /></label><label><span>steps</span><input type="number" min={1} max={200} value={jobSettings.steps} onChange={(event) => patchJobSettings({ steps: Number(event.target.value) })} /></label>
+            <label className="wide seed-control"><span>seed</span><input type="number" min={0} max={Number.MAX_SAFE_INTEGER} value={jobSettings.seed} onChange={(event) => patchJobSettings({ seed: Number(event.target.value) })} /><button type="button" onClick={() => patchJobSettings({ seed: randomSeed() })}>randomize</button></label>
+            <label className="wide"><span>sampler</span><input value={jobSettings.sampler} onChange={(event) => patchJobSettings({ sampler: event.target.value })} /></label>
+            <label><span>shift video</span><input type="number" step={0.1} value={jobSettings.shiftVideo} onChange={(event) => patchJobSettings({ shiftVideo: Number(event.target.value) })} /></label><label><span>shift audio</span><input type="number" step={0.1} value={jobSettings.shiftAudio} onChange={(event) => patchJobSettings({ shiftAudio: Number(event.target.value) })} /></label>
+            <label><span>input scaling</span><select value={jobSettings.inputScaling} onChange={(event) => patchJobSettings({ inputScaling: event.target.value })}><option value="match">match</option><option value="fit">fit</option><option value="fill">fill</option><option value="native">native</option><option value="720">720px</option><option value="1024">1024px</option></select></label><label><span>workflow</span><select value={jobSettings.workflowPreset} onChange={(event) => patchJobSettings({ workflowPreset: event.target.value as JobSettings["workflowPreset"] })}><option value="dasiwa-ref2va:v1">dasiwa-ref2va:v1</option></select></label>
+            <label><span>container</span><select value={jobSettings.outputContainer} onChange={(event) => patchJobSettings({ outputContainer: event.target.value })}><option>Auto</option><option>mp4</option><option>mov</option><option>mkv</option></select></label><label><span>codec</span><select value={jobSettings.outputCodec} onChange={(event) => patchJobSettings({ outputCodec: event.target.value })}><option>Auto</option><option>h264</option><option>hevc</option><option>prores</option></select></label>
+            <label><span>quality</span><input type="number" min={0} max={100} value={jobSettings.outputQuality} onChange={(event) => patchJobSettings({ outputQuality: Number(event.target.value) })} /></label><label><span>audio codec</span><select value={jobSettings.audioCodec} onChange={(event) => patchJobSettings({ audioCodec: event.target.value })}><option>Auto</option><option>aac</option><option>opus</option><option>pcm_s16le</option></select></label>
+            <label className="wide"><span>audio bitrate</span><select value={jobSettings.audioBitrate} onChange={(event) => patchJobSettings({ audioBitrate: event.target.value })}><option>96k</option><option>128k</option><option>192k</option><option>256k</option><option>320k</option></select></label>
+          </div></details>
+          <div className="single-actions"><button className="secondary" disabled={!generatedPrompt} onClick={() => void navigator.clipboard.writeText(generatedPrompt).then(() => setMessage("Prompt copied."))}>copy prompt</button><button className="primary" disabled={!generatedPrompt || busy === "export"} onClick={() => void sealBundle()}>{busy === "export" ? "hashing + sealing…" : "seal job zip"}</button></div>
         </aside>
       </div>
 

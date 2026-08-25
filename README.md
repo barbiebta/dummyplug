@@ -9,7 +9,7 @@ Dummyplug turns a small set of reference images, videos, and audio files into on
 3. Analyze an asset on command when visual evidence would help.
 4. Check the references for the next generation.
 5. Write a simple action and generate the six-part prompt.
-6. Copy the prompt or export the selected media, prompt, attachment map, and metadata as a ZIP.
+6. Set generation/output parameters and seal the selected media, prompt, attachment map, metadata, manifest, and checksums as an immutable `.dummyjob.zip`.
 
 The product scope is intentionally limited to this path and always targets one uninterrupted shot.
 
@@ -28,6 +28,12 @@ Chrome or another Chromium browser is recommended for persistent file and folder
 - The generated prompt contains the six official REF2VA sections and exactly one `[Shot 1]` in `detailed_description`.
 
 These rules follow the [DaSiWa MiniMax H3 Director guide](https://github.com/darksidewalker/ComfyUI-DaSiWa-Nodes/blob/main/docs/minimax_h3_director.md) and MiniMax's linked full-reference rewrite format.
+
+## Sealed jobs
+
+`Seal job ZIP` creates a self-contained `dummyplug.h3-job.v1` archive for the `dasiwa-ref2va:v1` workflow. Reference order in the asset library determines the numbered H3 labels. Unchecked assets remain in the library but do not enter the job. Video trims are declarative; the original video bytes are bundled unchanged.
+
+Every job receives a new UUID and contains `manifest.json`, `prompt.txt`, `request.txt`, `reference-map.json`, `checksums.json`, `assets/`, and `metadata/`. The manifest records resolved generation parameters, reference labels, source media facts, trims, byte sizes, and SHA-256 values. `checksums.json` covers every other bundled file. No OpenRouter key or local absolute source path is written to the archive.
 
 ## Models
 

@@ -21,6 +21,11 @@ export interface AssetRecord {
   size: number;
   lastModified?: number;
   mimeType: string;
+  sourceWidth?: number;
+  sourceHeight?: number;
+  sourceDuration?: number;
+  trimStart?: number;
+  trimEnd?: number;
   previewUrl: string;
   selected: boolean;
   canonicalName: string;
@@ -30,6 +35,25 @@ export interface AssetRecord {
   note: string;
   analysis?: AssetAnalysis;
   missingFile?: boolean;
+}
+
+export interface JobSettings {
+  title: string;
+  width: number;
+  height: number;
+  fps: number;
+  seed: number;
+  steps: number;
+  sampler: string;
+  shiftVideo: number;
+  shiftAudio: number;
+  inputScaling: string;
+  outputContainer: string;
+  outputCodec: string;
+  outputQuality: number;
+  audioCodec: string;
+  audioBitrate: string;
+  workflowPreset: "dasiwa-ref2va:v1";
 }
 
 export interface AssetAnalysis {
