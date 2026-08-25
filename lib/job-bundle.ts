@@ -61,7 +61,7 @@ export function validateJobSettings(settings: JobSettings, duration: number) {
   if (!Number.isInteger(settings.steps) || settings.steps < 1 || settings.steps > 200) errors.push("Steps must be from 1 to 200.");
   if (!Number.isFinite(settings.shiftVideo)) errors.push("shift_video must be a finite number.");
   if (!Number.isFinite(settings.shiftAudio)) errors.push("shift_audio must be a finite number.");
-  if (!Number.isFinite(settings.outputQuality) || settings.outputQuality < 0 || settings.outputQuality > 100) errors.push("Output quality must be from 0 to 100.");
+  if (!Number.isFinite(settings.outputQuality) || settings.outputQuality < 0 || settings.outputQuality > 51) errors.push("Video quality (CRF/CQ) must be from 0 to 51; lower values preserve more quality.");
   if (!settings.sampler.trim()) errors.push("Sampler is required.");
   return errors;
 }

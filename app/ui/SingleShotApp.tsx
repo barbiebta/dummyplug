@@ -55,6 +55,9 @@ function defaultReferenceUse(kind: AssetKind): ReferenceUse {
 
 type FileHandleLike = PersistedFileHandle;
 type DirectoryHandleLike = PersistedDirectoryHandle;
+interface SaveFileHandleLike {
+  createWritable(): Promise<{ write(data: Blob): Promise<void>; close(): Promise<void> }>;
+}
 interface FolderFile { file: File; relativePath: string; directory: DirectoryHandleLike; handle: FileHandleLike }
 
 class ProviderRequestError extends Error {
@@ -200,6 +203,7 @@ export function SingleShotApp() {
   const [dragging, setDragging] = useState(false);
   const [assetFilterKind, setAssetFilterKind] = useState<"all" | AssetKind>("all");
   const [assetFilterText, setAssetFilterText] = useState("");
+  const [sealFeedback, setSealFeedback] = useState("");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileStore = useRef(new Map<string, File>());
@@ -331,6 +335,13 @@ export function SingleShotApp() {
     if (!query) return true;
     return [asset.name, asset.canonicalName, asset.role, asset.referenceUse, asset.sourceOf, asset.note, asset.analysis ? JSON.stringify(asset.analysis) : ""].filter(Boolean).join(" ").toLocaleLowerCase().includes(query);
   });
+  const sealIssues = [
+    ...(!generatedPrompt.trim() ? ["Write or generate the six-part prompt."] : validation && !validation.valid ? ["The six-part prompt does not validate against the current selected references."] : []),
+    ...compiled.warnings,
+    ...validateJobSettings(jobSettings, durationSeconds),
+    ...chosenAssets.map(validateVideoTrim).filter((issue): issue is string => Boolean(issue)),
+    ...chosenAssets.filter((asset) => asset.missingFile).map((asset) => `${asset.name}: reload the source file.`),
+  ];
 
   async function postProvider(body: Record<string, unknown>) {
     if (settings.provider === "openrouter" && !settings.apiKey.trim()) {
@@ -641,11 +652,33 @@ export function SingleShotApp() {
   }
 
   async function sealBundle() {
-    if (!generatedPrompt.trim()) return setMessage("Generate or write the final prompt before sealing.");
-    const settingErrors = validateJobSettings(jobSettings, durationSeconds);
-    const trimErrors = chosenAssets.map(validateVideoTrim).filter(Boolean);
-    if (settingErrors.length || trimErrors.length) return setMessage([...settingErrors, ...trimErrors].join(" "));
+    const sourceIssues = chosenAssets.filter((asset) => !fileStore.current.has(asset.id)).map((asset) => `${asset.name}: reload the source file.`);
+    const currentIssues = [...new Set([...sealIssues, ...sourceIssues])];
+    if (currentIssues.length) {
+      const detail = currentIssues.join(" ");
+      setSealFeedback(detail);
+      setMessage(detail);
+      return;
+    }
+    const jobId = crypto.randomUUID();
+    const suggestedName = `${jobId}.dummyjob.zip`;
+    const savePicker = (window as Window & { showSaveFilePicker?: (options?: { suggestedName?: string; types?: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<SaveFileHandleLike> }).showSaveFilePicker;
+    let saveHandle: SaveFileHandleLike | null = null;
+    if (savePicker) {
+      try {
+        setSealFeedback("Choose where to save the immutable job ZIP.");
+        saveHandle = await savePicker({ suggestedName, types: [{ description: "Dummyplug job ZIP", accept: { "application/zip": [".zip"] } }] });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          setSealFeedback("Seal canceled before hashing; no file was written.");
+          return;
+        }
+        setSealFeedback(error instanceof Error ? error.message : "Could not choose a save destination.");
+        return;
+      }
+    }
     setBusy("export");
+    setSealFeedback(`Hashing ${chosenAssets.length} reference${chosenAssets.length === 1 ? "" : "s"}…`);
     setMessage(`Hashing ${chosenAssets.length} reference${chosenAssets.length === 1 ? "" : "s"} and sealing an immutable job…`);
     try {
       const result = await sealJobZip({
@@ -657,16 +690,31 @@ export function SingleShotApp() {
         duration: durationSeconds,
         settings: jobSettings,
         subjects: compiled.subjects,
+        jobId,
       });
       const blob = new Blob([result.bytes.slice().buffer], { type: "application/zip" });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `${result.jobId}.dummyjob.zip`;
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      if (saveHandle) {
+        const writable = await saveHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = suggestedName;
+        anchor.style.display = "none";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      }
+      setSealFeedback(`Saved ${suggestedName}.`);
       setMessage(`Sealed ${result.jobId}.dummyjob.zip with ${chosenAssets.length} hashed reference${chosenAssets.length === 1 ? "" : "s"}.`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not seal job."); }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Could not seal job.";
+      setSealFeedback(detail);
+      setMessage(detail);
+    }
     finally { setBusy(null); }
   }
 
@@ -760,9 +808,10 @@ export function SingleShotApp() {
             <label><span>shift video</span><input type="number" step={0.1} value={jobSettings.shiftVideo} onChange={(event) => patchJobSettings({ shiftVideo: Number(event.target.value) })} /></label><label><span>shift audio</span><input type="number" step={0.1} value={jobSettings.shiftAudio} onChange={(event) => patchJobSettings({ shiftAudio: Number(event.target.value) })} /></label>
             <label><span>input scaling</span><select value={jobSettings.inputScaling} onChange={(event) => patchJobSettings({ inputScaling: event.target.value })}><option value="match">match</option><option value="fit">fit</option><option value="fill">fill</option><option value="native">native</option><option value="720">720px</option><option value="1024">1024px</option></select></label><label><span>workflow</span><select value={jobSettings.workflowPreset} onChange={(event) => patchJobSettings({ workflowPreset: event.target.value as JobSettings["workflowPreset"] })}><option value="dasiwa-ref2va:v1">dasiwa-ref2va:v1</option></select></label>
             <label><span>container</span><select value={jobSettings.outputContainer} onChange={(event) => patchJobSettings({ outputContainer: event.target.value })}><option>Auto</option><option>mp4</option><option>mov</option><option>mkv</option></select></label><label><span>codec</span><select value={jobSettings.outputCodec} onChange={(event) => patchJobSettings({ outputCodec: event.target.value })}><option>Auto</option><option>h264</option><option>hevc</option><option>prores</option></select></label>
-            <label><span>quality</span><input type="number" min={0} max={100} value={jobSettings.outputQuality} onChange={(event) => patchJobSettings({ outputQuality: Number(event.target.value) })} /></label><label><span>audio codec</span><select value={jobSettings.audioCodec} onChange={(event) => patchJobSettings({ audioCodec: event.target.value })}><option>Auto</option><option>aac</option><option>opus</option><option>pcm_s16le</option></select></label>
+            <label title="Video encoder CRF/CQ. Lower values preserve more quality and produce larger files."><span>video quality (CRF/CQ)</span><input type="number" min={0} max={51} value={jobSettings.outputQuality} onChange={(event) => patchJobSettings({ outputQuality: Number(event.target.value) })} /></label><label><span>audio codec</span><select value={jobSettings.audioCodec} onChange={(event) => patchJobSettings({ audioCodec: event.target.value })}><option>Auto</option><option>aac</option><option>opus</option><option>pcm_s16le</option></select></label>
             <label className="wide"><span>audio bitrate</span><select value={jobSettings.audioBitrate} onChange={(event) => patchJobSettings({ audioBitrate: event.target.value })}><option>96k</option><option>128k</option><option>192k</option><option>256k</option><option>320k</option></select></label>
           </div></details>
+          <div className={`seal-feedback ${sealIssues.length ? "error" : sealFeedback ? "active" : "ready"}`} aria-live="polite">{sealIssues.length ? sealIssues[0] : sealFeedback || "Ready to hash and seal this immutable job."}</div>
           <div className="single-actions"><button className="secondary" disabled={!generatedPrompt} onClick={() => void navigator.clipboard.writeText(generatedPrompt).then(() => setMessage("Prompt copied."))}>copy prompt</button><button className="primary" disabled={!generatedPrompt || busy === "export"} onClick={() => void sealBundle()}>{busy === "export" ? "hashing + sealing…" : "seal job zip"}</button></div>
         </aside>
       </div>

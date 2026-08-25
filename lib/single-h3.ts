@@ -87,7 +87,7 @@ export function validateSingleShotPrompt(prompt: string, attachments: Attachment
   const subjectDefinitions = missing.length ? "" : sectionText("subject_definitions:", "summary:");
   const retentionAnalysis = missing.length ? "" : sectionText("retention_analysis:", "detailed_description:");
   const normalizedRetention = retentionAnalysis.replace(/\r/g, "").replace(/\n(?!\s*<(?:Subject|Picture|Video|Audio)\s+\d+>)/g, " ");
-  const startsOwnLine = (text: string, label: string) => new RegExp(`^\\s*${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`, "m").test(text);
+  const startsOwnLine = (text: string, label: string) => new RegExp(`^\\s*${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=\\s|:|$)`, "m").test(text);
   const standaloneDefinitionMissing = attachments.filter((attachment) => attachment.standaloneEntry && !startsOwnLine(subjectDefinitions, attachment.label)).map((attachment) => attachment.label);
   const standaloneRetentionMissing = attachments.filter((attachment) => attachment.standaloneEntry && !startsOwnLine(retentionAnalysis, attachment.label)).map((attachment) => attachment.label);
   const sourceOnlyStandaloneDefinitions = attachments.filter((attachment) => !attachment.standaloneEntry && startsOwnLine(subjectDefinitions, attachment.label)).map((attachment) => attachment.label);

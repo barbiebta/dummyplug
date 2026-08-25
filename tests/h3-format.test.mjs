@@ -58,6 +58,8 @@ test("validates source-only labels, structural entries, six sections, and exactl
     "N/A",
   ].join("\n");
   assert.equal(validateSingleShotPrompt(prompt, compiled.attachments, compiled.subjects).valid, true);
+  const colonDefinition = prompt.replace("<Video 2> provides", "<Video 2>: provides");
+  assert.equal(validateSingleShotPrompt(colonDefinition, compiled.attachments, compiled.subjects).valid, true);
   assert.equal(validateSingleShotPrompt(`${prompt}\n[Shot 2] cutaway`, compiled.attachments, compiled.subjects).valid, false);
 
   const wrongStandalonePicture = prompt.replace("<Subject 1> is Rabbit", "<Picture 1> is a character appearance source.\n<Subject 1> is Rabbit");
