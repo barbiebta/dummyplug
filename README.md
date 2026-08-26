@@ -51,6 +51,8 @@ npm install
 npm run dev
 ```
 
+`npm run dev` performs a credential-free OpenRouter network preflight before starting the local server. When Codex launches it, outbound network permission is required; otherwise startup stops with an explicit error instead of running a provider bridge that cannot reach OpenRouter.
+
 Verification:
 
 ```powershell

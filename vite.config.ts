@@ -93,9 +93,15 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
-    server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
+    server: {
+      // Vite 8's browser-console forwarder can attempt to send through a
+      // cleared WebSocket while the dev server is restarting. HMR remains on;
+      // only forwarding browser warnings/errors back to this terminal is off.
+      forwardConsole: false,
+      ...(isCodexSeatbeltSandbox
+        ? { watch: { useFsEvents: false, usePolling: true } }
+        : {}),
+    },
     plugins: [
       localProviderBridge(),
       vinext(),
