@@ -5,8 +5,8 @@ export const metadata: Metadata = {
   title: "dummyplug",
   description: "Durable reference metadata and one continuous MiniMax H3 take.",
   icons: {
-    icon: "/favicon.svg",
-    shortcut: "/favicon.svg",
+    icon: "/dummyplug-head.png",
+    shortcut: "/dummyplug-head.png",
   },
 };
 

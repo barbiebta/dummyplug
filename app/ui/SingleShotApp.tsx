@@ -747,7 +747,7 @@ export function SingleShotApp() {
 
   return (
     <main className="app-shell">
-      <header className="topbar"><div className="brand-block"><span className="brand-mark">dp</span><div><h1>dummyplug</h1><p>single-take reference desk · MiniMax H3</p></div></div><div className="top-actions"><span className={`provider-state provider-${settings.provider}`}>{settings.provider}</span><button className="heart-button" onClick={() => setSettingsOpen(true)}><span>♥</span> settings</button></div></header>
+      <header className="topbar"><div className="brand-block"><span className="brand-mark" aria-hidden="true"><img src="/dummyplug-head.png" alt="" /></span><div><h1>dummyplug</h1><p>job bundler · MiniMax H3</p></div></div><div className="top-actions"><span className={`provider-state provider-${settings.provider}`}>{settings.provider}</span><button className="heart-button" aria-label="settings" title="settings" onClick={() => setSettingsOpen(true)}><span aria-hidden="true">♥</span></button></div></header>
       <section className="status-strip" aria-live="polite"><span className={busy ? "pulse-dot" : "status-dot"} /><span>{message}</span><span className="status-metrics">{assets.length} assets · {analyzedCount} analyzed · {chosenAssets.length} selected</span></section>
 
       <div className="single-grid">
