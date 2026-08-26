@@ -5,6 +5,7 @@ import {
   readReferenceSidecar,
   sidecarMatchKey,
   sidecarName,
+  legacySidecarName,
 } from "../lib/reference-sidecar.ts";
 
 const asset = {
@@ -44,14 +45,19 @@ const settings = {
   promptMaxTokens: 32_768,
 };
 
-test("sidecar filename replaces only the source extension", () => {
-  assert.equal(sidecarName("rabbit.sheet.png"), "rabbit.sheet.json");
+test("sidecar filename is an exact companion to the source file", () => {
+  assert.equal(sidecarName("rabbit.sheet.png"), "rabbit.sheet.png.dummyplug.json");
+  assert.equal(legacySidecarName("rabbit.sheet.png"), "rabbit.sheet.json");
   assert.equal(sidecarMatchKey("folder/RABBIT.sheet.json"), "folder/rabbit.sheet");
+  assert.equal(sidecarMatchKey("folder/RABBIT.sheet.png.dummyplug.json"), "folder/rabbit.sheet");
 });
 
 test("sidecar round trip rebinds analysis to the newly loaded asset id", () => {
   const sidecar = makeReferenceSidecar(asset, settings, "2026-08-21T00:00:00.000Z");
   assert.ok(sidecar);
+  assert.equal(sidecar.schema, "dummyplug.asset.v4");
+  assert.equal(sidecar.assetId, "asset-rabbit");
+  assert.equal(sidecar.relativePath, "rabbit.sheet.png");
   assert.equal(sidecar.provider.visionModel, "vision/model");
   assert.equal("apiKey" in sidecar.provider, false);
 
@@ -65,6 +71,23 @@ test("sidecar round trip rebinds analysis to the newly loaded asset id", () => {
   assert.equal(imported?.sourceOf, "identity, blue dress, and body proportions");
   assert.equal(imported?.note, "rabbit identity; drunk and happy");
   assert.deepEqual(imported?.source, { name: "rabbit.sheet.png", size: 42, mimeType: "image/png" });
+});
+
+test("legacy v3 sidecars remain readable and normalize to v4", () => {
+  const legacy = { schema: "dummyplug.asset.v3", source: { name: "rabbit.png", size: 42, mimeType: "image/png" }, metadata: { canonicalName: "Rabbit", role: "character", referenceUse: "subject", sourceOf: "identity", note: "old note" }, analysis: { summary: "old analysis", subjects: ["rabbit"] } };
+  const imported = readReferenceSidecar(JSON.stringify(legacy), "asset-rebound");
+  assert.equal(imported?.schema, "dummyplug.asset.v4");
+  assert.equal(imported?.assetId, undefined);
+  assert.equal(imported?.analysis?.assetId, "asset-rebound");
+  assert.equal(imported?.source?.name, "rabbit.png");
+});
+
+test("v4 carries project recrawl facts and preserves them on read", () => {
+  const sidecar = makeReferenceSidecar(asset, settings, "2026-08-21T00:00:00.000Z", { relativePath: "characters/rabbit.sheet.png", importedAt: "2026-08-20T00:00:00.000Z", sha256: "abc123" });
+  assert.equal(sidecar.relativePath, "characters/rabbit.sheet.png");
+  assert.equal(sidecar.importedAt, "2026-08-20T00:00:00.000Z");
+  assert.equal(sidecar.source.sha256, "abc123");
+  assert.equal(readReferenceSidecar(JSON.stringify(sidecar), "asset-rabbit")?.relativePath, "characters/rabbit.sheet.png");
 });
 
 test("manual metadata writes a sidecar before vision analysis exists", () => {

@@ -129,6 +129,8 @@ test("seals an independently verifiable REF2VA job archive", async () => {
     settings: { ...DEFAULT_JOB_SETTINGS, width: 768, height: 1344, fps: 24, seed: 123456 },
     subjects: compiled.subjects,
     jobId: "11111111-2222-4333-8444-555555555555",
+    projectName: "Rabbit project",
+    jobDesc: "Rabbit walk",
     now: new Date("2026-08-25T12:00:00.000Z"),
   });
   const zip = await JSZip.loadAsync(result.bytes);
@@ -139,8 +141,10 @@ test("seals an independently verifiable REF2VA job archive", async () => {
   assert.ok(paths.includes("reference-map.json"));
   assert.ok(paths.includes("checksums.json"));
   const manifest = JSON.parse(await zip.file("manifest.json").async("string"));
-  assert.equal(manifest.schema, "dummyplug.h3-job.v1");
+  assert.equal(manifest.schema, "dummyplug.h3-job.v2");
   assert.equal(manifest.job_id, "11111111-2222-4333-8444-555555555555");
+  assert.equal(manifest.job_desc, "Rabbit walk");
+  assert.equal(manifest.title, "Rabbit project");
   assert.deepEqual(manifest.workflow, { template: "dasiwa-ref2va", version: 1 });
   assert.deepEqual(manifest.generation, {
     width: 768, height: 1344, duration: 5, fps: 24, seed: 123456, steps: 25, sampler: "res_multistep", shift_video: 12, shift_audio: 3, ref_image_size: "max", input_scaling: "Auto",

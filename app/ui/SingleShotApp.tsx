@@ -4,12 +4,19 @@
 /* eslint-disable jsx-a11y/no-static-element-interactions -- the modal backdrop only closes on direct backdrop clicks */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { JobAttachmentStrip } from "./JobAttachmentStrip";
+import { ProjectDialog } from "./ProjectDialog";
+import { FolderLibraryView } from "./FolderLibraryView";
 import { loadBrowserWorkspace, saveBrowserWorkspace, type PersistedDirectoryHandle, type PersistedFileHandle, type PersistedWorkspace } from "../../lib/browser-workspace";
-import { DEFAULT_JOB_SETTINGS, normalizeJobSettings, randomSeed, sealJobZip, validateJobSettings, validateVideoTrim } from "../../lib/job-bundle";
+import { DEFAULT_JOB_SETTINGS, normalizeJobSettings, randomSeed, sealJobZip, sha256Hex, validateJobSettings, validateVideoTrim } from "../../lib/job-bundle";
+import { createJobId, DEFAULT_VERB_FAMILIES, deriveJobDesc, normalizeJobDesc } from "../../lib/job-identity";
+import type { VerbFamily } from "../../lib/job-identity";
+import { DEFAULT_PROJECT_OUTPUT_SETTINGS } from "../../lib/project-contract";
+import type { ProjectAsset, ProjectManifest, ProjectOutputSettings } from "../../lib/project-contract";
+import { createProject, createProjectFolder, importProjectAsset, listProjects, loadProject, moveProjectAsset, moveProjectFolder, projectAssetUrl, refreshProjectAssets, removeProjectFolder, renameProjectAsset, renameProjectFolder, saveProjectDraft, trashProjectAsset, updateProjectAsset, updateProjectSettings } from "../../lib/project-library-client";
 import { makeReferenceSidecar, readReferenceSidecar, sidecarMatchKey, sidecarName } from "../../lib/reference-sidecar";
 import { compileAttachments, makeDemoAnalysis, validateSingleShotPrompt } from "../../lib/single-h3";
 import { DEFAULT_PROMPT_TEMPLATES, EXPOSED_PROMPT_TEMPLATES, type PromptTemplateId, type PromptTemplateMap } from "../../lib/single-prompts";
-import { DIRECTOR_INPUT_SCALING_OPTIONS } from "../../lib/types";
 import type { AssetKind, AssetRecord, AssetRole, JobSettings, ModelSettings, PreparedReference, ReferenceUse } from "../../lib/types";
 
 const DEFAULT_SETTINGS: ModelSettings = {
@@ -100,6 +107,48 @@ function humanBytes(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 ** 2).toFixed(1)} MB`;
+}
+
+function projectAssetRecord(projectId: string, asset: ProjectAsset, selectedIds: Set<string>): AssetRecord {
+  const source = asset.metadata || {};
+  return {
+    id: asset.id,
+    name: asset.name,
+    relativePath: asset.relativePath,
+    importedAt: asset.importedAt,
+    kind: asset.kind,
+    size: asset.size,
+    lastModified: asset.lastModified,
+    mimeType: asset.mimeType,
+    sourceWidth: asset.sourceWidth,
+    sourceHeight: asset.sourceHeight,
+    sourceDuration: asset.sourceDuration,
+    sha256: asset.sha256,
+    trimStart: asset.kind === "video" ? Number(source.trimStart ?? 0) : undefined,
+    trimEnd: asset.kind === "video" ? Number(source.trimEnd ?? source.duration ?? 0) || undefined : undefined,
+    previewUrl: projectAssetUrl(projectId, asset.relativePath),
+    selected: selectedIds.has(asset.id),
+    canonicalName: asset.canonicalName,
+    role: asset.role,
+    referenceUse: asset.referenceUse,
+    sourceOf: asset.sourceOf,
+    note: asset.note,
+    analysis: asset.analysis as AssetRecord["analysis"],
+    missingFile: false,
+  };
+}
+
+function verbVocabularyText(families: VerbFamily[]) {
+  return families.map((family) => `${family.lemma}: ${family.forms.join(", ")}`).join("\n");
+}
+
+function parseVerbVocabulary(text: string) {
+  return text.split(/\r?\n/).map((line) => {
+    const [lemma, forms] = line.split(":", 2);
+    const cleanLemma = lemma?.trim().toLocaleLowerCase();
+    const cleanForms = forms?.split(",").map((form) => form.trim().toLocaleLowerCase()).filter(Boolean) || [];
+    return cleanLemma && cleanForms.length ? { lemma: cleanLemma, forms: [...new Set(cleanForms)] } : null;
+  }).filter((family): family is VerbFamily => Boolean(family) && family!.lemma !== "be");
 }
 
 function fileToDataUrl(file: Blob) {
@@ -194,17 +243,30 @@ export function SingleShotApp() {
   const [promptHistory, setPromptHistory] = useState<string[]>([]);
   const [settings, setSettings] = useState<ModelSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsPage, setSettingsPage] = useState<"connection" | "prompts">("connection");
+  const [settingsPage, setSettingsPage] = useState<"connection" | "prompts" | "naming">("connection");
   const [promptOverrides, setPromptOverrides] = useState<Partial<PromptTemplateMap>>({});
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null);
-  const [metadataDirectoryName, setMetadataDirectoryName] = useState("");
   const [storageReady, setStorageReady] = useState(false);
   const [busy, setBusy] = useState<"analyze" | "generate" | "export" | "test" | null>(null);
-  const [message, setMessage] = useState("Add assets, tag what they are sources of, then select references for one continuous take.");
+  const [message, setMessage] = useState("Choose a project, import assets, and assemble a job.");
   const [dragging, setDragging] = useState(false);
   const [assetFilterKind, setAssetFilterKind] = useState<"all" | AssetKind>("all");
   const [assetFilterText, setAssetFilterText] = useState("");
   const [sealFeedback, setSealFeedback] = useState("");
+  const [providerStatus, setProviderStatus] = useState<"unknown" | "connected" | "failed">("unknown");
+  const [projects, setProjects] = useState<ProjectManifest[]>([]);
+  const [activeProject, setActiveProject] = useState<ProjectManifest | null>(null);
+  const [draftReadyProjectId, setDraftReadyProjectId] = useState("");
+  const [projectRoot, setProjectRoot] = useState("");
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [attachmentOrder, setAttachmentOrder] = useState<string[]>([]);
+  const [jobDesc, setJobDesc] = useState("");
+  const [seedMode, setSeedMode] = useState<"fixed" | "random">("fixed");
+  const [libraryView, setLibraryView] = useState<"list" | "folders">("list");
+  const [libraryFolders, setLibraryFolders] = useState<string[]>([]);
+  const [verbFamilies, setVerbFamilies] = useState(DEFAULT_VERB_FAMILIES);
+  const [verbText, setVerbText] = useState(() => verbVocabularyText(DEFAULT_VERB_FAMILIES));
+  const [legacyAssetCount, setLegacyAssetCount] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileStore = useRef(new Map<string, File>());
@@ -212,6 +274,8 @@ export function SingleShotApp() {
   const sourceDirectoryStore = useRef(new Map<string, { directory: DirectoryHandleLike; sourceName: string }>());
   const metadataDirectoryStore = useRef<DirectoryHandleLike | null>(null);
   const activeController = useRef<AbortController | null>(null);
+  const providerProbeActive = useRef(false);
+  const legacyWorkspaceStore = useRef<PersistedWorkspace | null>(null);
 
   useEffect(() => {
     let canceled = false;
@@ -245,10 +309,11 @@ export function SingleShotApp() {
       }
       if (canceled) return;
       if (saved) {
+        legacyWorkspaceStore.current = saved;
+        setLegacyAssetCount(saved.assets.length);
         const directory = saved.metadataDirectory;
         if (directory) {
           metadataDirectoryStore.current = directory;
-          setMetadataDirectoryName(directory.name || "selected folder");
         }
         const restored: AssetRecord[] = [];
         for (const item of saved.assets) {
@@ -302,6 +367,45 @@ export function SingleShotApp() {
 
   useEffect(() => {
     if (!storageReady) return;
+    let canceled = false;
+    void (async () => {
+      try {
+        const result = await listProjects();
+        if (canceled) return;
+        setProjects(result.projects);
+        setProjectRoot(result.root);
+        const lastProjectId = localStorage.getItem("dummyplug.lastProjectId") || "";
+        const initial = result.projects.find((project) => project.id === lastProjectId) || result.projects[0];
+        if (initial) await openProject(initial.id);
+        else { setProjectDialogOpen(true); setMessage("Create a project or migrate the restored browser workspace."); }
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : "Could not open the project library.");
+        setProjectDialogOpen(true);
+      }
+      const rawVerbs = localStorage.getItem("dummyplug.verbFamilies.v1");
+      if (rawVerbs) try { const parsed = JSON.parse(rawVerbs) as VerbFamily[]; setVerbFamilies(parsed); setVerbText(verbVocabularyText(parsed)); } catch { /* retain defaults */ }
+    })();
+    return () => { canceled = true; };
+  }, [storageReady]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setProviderStatus(settings.provider === "demo" ? "connected" : "unknown"), 0);
+    return () => window.clearTimeout(timer);
+  }, [settings.apiKey, settings.baseUrl, settings.provider, settings.promptModel, settings.visionModel]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    const probe = () => { if (document.visibilityState === "visible") void testProvider(true); };
+    window.addEventListener("focus", probe);
+    document.addEventListener("visibilitychange", probe);
+    const timer = window.setTimeout(probe, 600);
+    return () => { window.clearTimeout(timer); window.removeEventListener("focus", probe); document.removeEventListener("visibilitychange", probe); };
+  // Connection inputs intentionally re-register the focus probe.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.apiKey, settings.baseUrl, settings.provider, storageReady]);
+
+  useEffect(() => {
+    if (!storageReady || activeProject) return;
     const timer = window.setTimeout(() => {
       const persisted: PersistedWorkspace = {
         version: 2,
@@ -323,13 +427,170 @@ export function SingleShotApp() {
       void saveBrowserWorkspace(persisted).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [assets, durationSeconds, generatedPrompt, jobSettings, promptHistory, selectedAssetId, simplePrompt, storageReady]);
+  }, [activeProject, assets, durationSeconds, generatedPrompt, jobSettings, promptHistory, selectedAssetId, simplePrompt, storageReady]);
+
+  useEffect(() => {
+    if (!activeProject || draftReadyProjectId !== activeProject.id) return;
+    const timer = window.setTimeout(() => {
+      void saveProjectDraft(activeProject.id, {
+        simplePrompt,
+        jobDesc,
+        selectedAssetIds: attachmentOrder,
+        duration: durationSeconds,
+        seedMode,
+        fixedSeed: jobSettings.seed,
+        generatedPrompt,
+        generatedPromptHistory: promptHistory,
+      }).catch((error) => setMessage(error instanceof Error ? error.message : "Could not save the project draft."));
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [activeProject, attachmentOrder, draftReadyProjectId, durationSeconds, generatedPrompt, jobDesc, jobSettings.seed, promptHistory, seedMode, simplePrompt]);
+
+  async function openProject(projectId: string) {
+    setDraftReadyProjectId("");
+    const loaded = await loadProject(projectId);
+    const selectedIds = new Set(loaded.draft.selectedAssetIds);
+    const records = loaded.assets.map((asset) => projectAssetRecord(projectId, asset, selectedIds));
+    fileStore.current.clear();
+    sourceHandleStore.current.clear();
+    sourceDirectoryStore.current.clear();
+    metadataDirectoryStore.current = null;
+    setActiveProject(loaded.project);
+    setProjectRoot(loaded.root);
+    setAssets(records);
+    setLibraryFolders(loaded.folders);
+    setAttachmentOrder(loaded.draft.selectedAssetIds.filter((id) => records.some((asset) => asset.id === id)));
+    setSelectedAssetId(records[0]?.id || "");
+    setSimplePrompt(loaded.draft.simplePrompt);
+    setJobDesc(loaded.draft.jobDesc);
+    setDurationSeconds(Math.max(1, Math.min(20, loaded.draft.duration || 5)));
+    setSeedMode(loaded.draft.seedMode);
+    setJobSettings({ ...DEFAULT_JOB_SETTINGS, ...loaded.project.outputSettings, title: loaded.project.name, seed: loaded.draft.fixedSeed });
+    setGeneratedPrompt(loaded.draft.generatedPrompt);
+    setPromptHistory(loaded.draft.generatedPromptHistory.slice(0, 5));
+    localStorage.setItem("dummyplug.lastProjectId", loaded.project.id);
+    setProjectDialogOpen(false);
+    setMessage(`Opened ${loaded.project.name}; ${records.length} managed asset${records.length === 1 ? "" : "s"} ready.`);
+    window.requestAnimationFrame(() => setDraftReadyProjectId(loaded.project.id));
+  }
+
+  async function createAndOpenProject(name: string) {
+    try {
+      const created = await createProject(name);
+      setProjects((current) => [created.project, ...current]);
+      setProjectRoot(created.root);
+      await openProject(created.project.id);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not create the project."); }
+  }
+
+  async function migrateLegacyWorkspace(name: string) {
+    const legacy = legacyWorkspaceStore.current;
+    if (!legacy?.assets.length) return;
+    try {
+      const created = await createProject(name);
+      setMessage(`Copying ${legacy.assets.length} legacy asset${legacy.assets.length === 1 ? "" : "s"} into ${created.project.name}…`);
+      for (const item of legacy.assets) {
+        let file = item.file;
+        if (!file && item.sourceHandle) try { file = await item.sourceHandle.getFile(); } catch { /* report missing below */ }
+        if (!file) throw new Error(`${item.record.name}: the legacy source could not be reopened.`);
+        const record = { ...item.record, previewUrl: "" } as AssetRecord;
+        const sidecar = makeReferenceSidecar(record, settings, new Date().toISOString(), { relativePath: item.record.name, importedAt: item.record.importedAt });
+        await importProjectAsset(created.project.id, file, item.record.name, JSON.stringify(sidecar));
+      }
+      setProjects((current) => [created.project, ...current]);
+      await openProject(created.project.id);
+      setLegacyAssetCount(0);
+      setMessage(`Migrated ${legacy.assets.length} legacy asset${legacy.assets.length === 1 ? "" : "s"}. The old browser workspace remains untouched as a fallback.`);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not migrate the legacy workspace."); }
+  }
+
+  async function patchProjectOutputSettings(patch: Partial<ProjectOutputSettings>) {
+    if (!activeProject) return;
+    const optimistic = { ...activeProject.outputSettings, ...patch };
+    setActiveProject({ ...activeProject, outputSettings: optimistic });
+    setJobSettings((current) => ({ ...current, ...patch }));
+    try {
+      const result = await updateProjectSettings(activeProject.id, patch);
+      setActiveProject(result.project);
+      setProjects((current) => current.map((project) => project.id === result.project.id ? result.project : project));
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not save project settings."); }
+  }
+
+  async function recrawlProject() {
+    if (!activeProject) return;
+    try {
+      const refreshed = await refreshProjectAssets(activeProject.id);
+      const discovered = refreshed.assets;
+      const selectedIds = new Set(attachmentOrder);
+      const records = discovered.map((asset) => projectAssetRecord(activeProject.id, asset, selectedIds));
+      setAssets(records);
+      setLibraryFolders(refreshed.folders || []);
+      setAttachmentOrder((current) => current.filter((id) => records.some((asset) => asset.id === id)));
+      setMessage(`Refreshed ${activeProject.name}; ${records.length} asset${records.length === 1 ? "" : "s"} found.`);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not refresh the project library."); }
+  }
+
+  async function organizeAsset(action: "move" | "rename", asset: AssetRecord, value: string) {
+    if (!activeProject || !asset.relativePath) return;
+    try {
+      if (action === "move") await moveProjectAsset(activeProject.id, asset.relativePath, value);
+      else await renameProjectAsset(activeProject.id, asset.relativePath, value);
+      await recrawlProject();
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not organize the project asset."); }
+  }
+
+  async function createLibraryFolder(parent: string, name: string) {
+    if (!activeProject) return;
+    try { await createProjectFolder(activeProject.id, parent ? `${parent}/${name}` : name); await recrawlProject(); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Could not create the folder."); }
+  }
+
+  async function removeLibraryFolder(path: string) {
+    if (!activeProject) return;
+    try { await removeProjectFolder(activeProject.id, path); await recrawlProject(); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Only empty folders can be removed."); }
+  }
+
+  async function organizeFolder(action: "move" | "rename", path: string, value: string) {
+    if (!activeProject) return;
+    try {
+      if (action === "move") await moveProjectFolder(activeProject.id, path, value);
+      else await renameProjectFolder(activeProject.id, path, value);
+      await recrawlProject();
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Could not organize the folder."); }
+  }
+
+  async function ensureAssetFile(asset: AssetRecord) {
+    const cached = fileStore.current.get(asset.id);
+    if (cached) return cached;
+    if (!activeProject || !asset.relativePath) throw new Error(`${asset.name}: project source is unavailable.`);
+    const response = await fetch(projectAssetUrl(activeProject.id, asset.relativePath));
+    if (!response.ok) throw new Error(`${asset.name}: could not load the managed source.`);
+    const file = new File([await response.blob()], asset.name, { type: asset.mimeType, lastModified: asset.lastModified });
+    fileStore.current.set(asset.id, file);
+    return file;
+  }
+
+  async function hydrateAssetSource(asset: AssetRecord) {
+    if (!activeProject || !asset.relativePath || asset.kind === "audio" || (asset.kind === "image" ? asset.sourceWidth != null : asset.sourceDuration != null)) return;
+    try {
+      const inspected = await inspectSource(await ensureAssetFile(asset), asset.kind);
+      const patch: Partial<AssetRecord> = { ...inspected };
+      if (asset.kind === "video" && inspected.sourceDuration != null && asset.trimEnd == null) { patch.trimStart = 0; patch.trimEnd = inspected.sourceDuration; }
+      patchAsset(asset.id, patch);
+      await updateProjectAsset(activeProject.id, asset.relativePath, { sourceFacts: { width: inspected.sourceWidth, height: inspected.sourceHeight, duration: inspected.sourceDuration }, ...(asset.kind === "video" ? { metadata: { trimStart: patch.trimStart ?? asset.trimStart, trimEnd: patch.trimEnd ?? asset.trimEnd } } : {}) });
+    } catch { /* unsupported codecs remain usable for packaging and manual metadata */ }
+  }
 
   const selectedAsset = assets.find((asset) => asset.id === selectedAssetId) || assets[0];
-  const chosenAssets = assets.filter((asset) => asset.selected);
+  const chosenAssets = attachmentOrder.map((id) => assets.find((asset) => asset.id === id)).filter((asset): asset is AssetRecord => Boolean(asset));
+  // Source inspection is deliberately lazy for externally added assets.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (selectedAsset) void hydrateAssetSource(selectedAsset); }, [selectedAsset?.id, selectedAsset?.sourceDuration, selectedAsset?.sourceWidth]);
   const compiled = useMemo(() => compileAttachments(chosenAssets), [chosenAssets]);
   const validation = generatedPrompt ? validateSingleShotPrompt(generatedPrompt, compiled.attachments, compiled.subjects) : null;
   const analyzedCount = assets.filter((asset) => asset.analysis).length;
+  const resolvedJobDescPreview = deriveJobDesc(simplePrompt, chosenAssets, jobDesc, verbFamilies);
   const visibleAssets = assets.filter((asset) => {
     if (assetFilterKind !== "all" && asset.kind !== assetFilterKind) return false;
     const query = assetFilterText.trim().toLocaleLowerCase();
@@ -363,8 +624,10 @@ export function SingleShotApp() {
       try { payload = JSON.parse(text) as Record<string, unknown>; }
       catch { payload = { error: text.trim().slice(0, 700) || `Provider returned ${response.status} without JSON.` }; }
       if (!response.ok) throw new ProviderRequestError(String(payload.error || "Provider request failed."), payload);
+      setProviderStatus("connected");
       return payload;
     } catch (error) {
+      setProviderStatus("failed");
       if (controller.signal.aborted) throw new ProviderRequestError("Request canceled.", { canceled: true });
       throw error;
     } finally {
@@ -403,41 +666,33 @@ export function SingleShotApp() {
     } catch { return null; }
   }
 
-  async function chooseMetadataDirectory(importExisting = true) {
-    const picker = (window as Window & { showDirectoryPicker?: (options?: { mode?: "read" | "readwrite" }) => Promise<DirectoryHandleLike> }).showDirectoryPicker;
-    if (!picker) return setMessage("Direct metadata files require Chrome or another browser with folder access. Per-asset JSON download remains available.");
-    try {
-      const directory = await picker({ mode: "readwrite" });
-      metadataDirectoryStore.current = directory;
-      setMetadataDirectoryName(directory.name || "selected folder");
-      let importedCount = 0;
-      let nextAssets = assets;
-      if (importExisting) {
-        const importedById = new Map<string, NonNullable<Awaited<ReturnType<typeof readCachedSidecar>>>>();
-        for (const asset of assets) {
-          const file = fileStore.current.get(asset.id);
-          if (!file) continue;
-          const imported = await readCachedSidecar(directory, file, asset.id);
-          if (imported) { importedById.set(asset.id, imported); importedCount += 1; }
-        }
-        nextAssets = assets.map((asset) => {
-          const imported = importedById.get(asset.id);
-          return imported ? { ...asset, canonicalName: imported.canonicalName ?? asset.canonicalName, role: imported.role ?? asset.role, referenceUse: imported.referenceUse ?? asset.referenceUse, sourceOf: imported.sourceOf ?? asset.sourceOf, note: imported.note ?? asset.note, analysis: imported.analysis ?? asset.analysis } : asset;
-        });
-        setAssets(nextAssets);
-      }
-      let written = 0;
-      for (const asset of nextAssets) if (await writeAssetSidecar(asset, directory)) written += 1;
-      setMessage(`Metadata folder “${directory.name || "selected folder"}” ready; ${written} sidecar${written === 1 ? "" : "s"} written${importedCount ? ` and ${importedCount} loaded` : ""}.`);
-    } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) setMessage(error instanceof Error ? error.message : "Could not open metadata folder.");
-    }
-  }
-
   async function addFiles(files: FileList | File[], relativePaths = new Map<File, string>(), directories = new Map<File, DirectoryHandleLike>(), handles = new Map<File, FileHandleLike>()) {
     const incoming = [...files];
     const sidecars = new Map<string, File>();
     for (const file of incoming) if (file.type === "application/json" || file.name.toLocaleLowerCase().endsWith(".json")) sidecars.set(sidecarMatchKey(relativePaths.get(file) || file.webkitRelativePath || file.name), file);
+    if (activeProject) {
+      const media = incoming.filter((file) => kindFor(file));
+      if (!media.length) return setMessage("No supported image, video, or audio assets were found.");
+      setMessage(`Importing ${media.length} asset${media.length === 1 ? "" : "s"} into ${activeProject.name}…`);
+      try {
+        for (const file of media) {
+          const relativePath = relativePaths.get(file) || file.webkitRelativePath || file.name;
+          const companion = sidecars.get(sidecarMatchKey(relativePath));
+          const imported = await importProjectAsset(activeProject.id, file, relativePath, companion ? await companion.text() : undefined);
+          const kind = kindFor(file)!;
+          try {
+            const inspected = await inspectSource(file, kind);
+            await updateProjectAsset(activeProject.id, imported.relativePath, {
+              sourceFacts: { width: inspected.sourceWidth, height: inspected.sourceHeight, duration: inspected.sourceDuration },
+              ...(kind === "video" ? { metadata: { trimStart: 0, trimEnd: inspected.sourceDuration } } : {}),
+            });
+          } catch { /* retain imported source even when the browser cannot decode its codec */ }
+        }
+        await recrawlProject();
+        setMessage(`Imported ${media.length} asset${media.length === 1 ? "" : "s"} into ${activeProject.name}.`);
+      } catch (error) { setMessage(error instanceof Error ? error.message : "Could not import assets into the project."); }
+      return;
+    }
     const records: AssetRecord[] = [];
     const unsupported: string[] = [];
     let importedCount = 0;
@@ -517,47 +772,19 @@ export function SingleShotApp() {
     }
   }
 
-  async function reloadSources() {
-    const replacements = new Map<string, File>();
-    const sourceMetadata = new Map<string, Pick<AssetRecord, "sourceWidth" | "sourceHeight" | "sourceDuration">>();
-    let reloaded = 0;
-    for (const asset of assets) {
-      const handle = sourceHandleStore.current.get(asset.id);
-      if (!handle) continue;
-      try {
-        if (handle.queryPermission && await handle.queryPermission({ mode: "read" }) !== "granted" && (!handle.requestPermission || await handle.requestPermission({ mode: "read" }) !== "granted")) continue;
-        const file = await handle.getFile();
-        fileStore.current.set(asset.id, file);
-        replacements.set(asset.id, file);
-        try { sourceMetadata.set(asset.id, await inspectSource(file, asset.kind)); } catch { /* retain prior inspection */ }
-        reloaded += 1;
-      } catch { /* picker fallback below */ }
-    }
-    if (!reloaded) return void pickReferenceFiles();
-    setAssets((current) => current.map((asset) => {
-      const file = replacements.get(asset.id);
-      if (!file) return asset;
-      const changed = file.size !== asset.size || (asset.lastModified != null && file.lastModified !== asset.lastModified);
-      const inspected = sourceMetadata.get(asset.id) || {};
-      if (asset.previewUrl) URL.revokeObjectURL(asset.previewUrl);
-      return { ...asset, ...inspected, name: file.name, size: file.size, lastModified: file.lastModified, mimeType: mimeFor(file, asset.kind), previewUrl: URL.createObjectURL(file), missingFile: false, analysis: changed ? undefined : asset.analysis, ...(asset.kind === "video" && inspected.sourceDuration != null && (asset.trimEnd == null || changed) ? { trimStart: 0, trimEnd: inspected.sourceDuration } : {}) };
-    }));
-    setMessage(`Reloaded ${reloaded} source file${reloaded === 1 ? "" : "s"}.`);
-  }
-
   function patchAsset(id: string, patch: Partial<AssetRecord>) {
     setAssets((current) => current.map((asset) => asset.id === id ? { ...asset, ...patch } : asset));
   }
 
-  function moveAsset(id: string, direction: -1 | 1) {
-    setAssets((current) => {
-      const index = current.findIndex((asset) => asset.id === id);
-      const destination = index + direction;
-      if (index < 0 || destination < 0 || destination >= current.length) return current;
-      const next = [...current];
-      [next[index], next[destination]] = [next[destination], next[index]];
-      return next;
-    });
+  function toggleJobAsset(id: string) {
+    const included = attachmentOrder.includes(id);
+    setAttachmentOrder((current) => included ? current.filter((assetId) => assetId !== id) : [...current, id]);
+    patchAsset(id, { selected: !included });
+    if (!included) { const asset = assets.find((candidate) => candidate.id === id); if (asset) void hydrateAssetSource(asset); }
+  }
+
+  function reorderJobAssets(ids: string[]) {
+    setAttachmentOrder(ids);
   }
 
   function patchJobSettings(patch: Partial<JobSettings>) {
@@ -568,6 +795,11 @@ export function SingleShotApp() {
     const current = assets.find((asset) => asset.id === selectedAssetId);
     if (!current) return;
     try {
+      if (activeProject && current.relativePath) {
+        await updateProjectAsset(activeProject.id, current.relativePath, { metadata: { canonicalName: current.canonicalName, role: current.role, referenceUse: current.referenceUse, sourceOf: current.sourceOf, note: current.note, trimStart: current.trimStart, trimEnd: current.trimEnd, width: current.sourceWidth, height: current.sourceHeight, duration: current.sourceDuration } });
+        setMessage(`${sidecarName(current.name)} saved in ${activeProject.name}.`);
+        return;
+      }
       if (await writeAssetSidecar(current)) setMessage(`${sidecarName(current.name)} saved.`);
       else setMessage("Metadata is saved in the browser. Load a folder or choose a metadata folder to write the adjacent JSON file.");
     } catch (error) { setMessage(error instanceof Error ? error.message : "Could not save metadata JSON."); }
@@ -584,23 +816,33 @@ export function SingleShotApp() {
     window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
 
-  function removeAsset(id: string) {
+  async function removeAsset(id: string) {
     const target = assets.find((asset) => asset.id === id);
+    if (activeProject && target?.relativePath) {
+      try {
+        await trashProjectAsset(activeProject.id, target.relativePath);
+        setAttachmentOrder((current) => current.filter((assetId) => assetId !== id));
+        await recrawlProject();
+        if (selectedAssetId === id) setSelectedAssetId(assets.find((asset) => asset.id !== id)?.id || "");
+        setMessage(`${target.name} moved to the project trash.`);
+      } catch (error) { setMessage(error instanceof Error ? error.message : "Could not move the asset to trash."); }
+      return;
+    }
     if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
     fileStore.current.delete(id);
     sourceHandleStore.current.delete(id);
     sourceDirectoryStore.current.delete(id);
     setAssets((current) => current.filter((asset) => asset.id !== id));
+    setAttachmentOrder((current) => current.filter((assetId) => assetId !== id));
     if (selectedAssetId === id) setSelectedAssetId(assets.find((asset) => asset.id !== id)?.id || "");
   }
 
   async function analyzeSelected() {
     if (!selectedAsset) return setMessage("Select an asset first.");
-    const file = fileStore.current.get(selectedAsset.id);
-    if (!file) return setMessage("Reload this source file before analysis.");
     setBusy("analyze");
     setMessage(`Analyzing ${selectedAsset.name} as ${selectedAsset.role}…`);
     try {
+      const file = await ensureAssetFile(selectedAsset);
       let analysis: AssetRecord["analysis"];
       if (settings.provider === "demo") analysis = makeDemoAnalysis(selectedAsset);
       else {
@@ -612,7 +854,9 @@ export function SingleShotApp() {
       if (!analysis) throw new Error("The vision model returned no analysis.");
       const updated = { ...selectedAsset, analysis };
       patchAsset(selectedAsset.id, { analysis });
-      const saved = await writeAssetSidecar(updated);
+      const saved = activeProject && updated.relativePath
+        ? Boolean(await updateProjectAsset(activeProject.id, updated.relativePath, { metadata: { canonicalName: updated.canonicalName, role: updated.role, referenceUse: updated.referenceUse, sourceOf: updated.sourceOf, note: updated.note, trimStart: updated.trimStart, trimEnd: updated.trimEnd, width: updated.sourceWidth, height: updated.sourceHeight, duration: updated.sourceDuration }, analysis: analysis as unknown as Record<string, unknown> }))
+        : await writeAssetSidecar(updated);
       setMessage(`${selectedAsset.name} analyzed${saved ? `; ${sidecarName(selectedAsset.name)} updated on disk` : "; metadata retained in browser storage"}.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : "Analysis failed."); }
     finally { setBusy(null); }
@@ -653,7 +897,7 @@ export function SingleShotApp() {
   }
 
   async function sealBundle() {
-    const sourceIssues = chosenAssets.filter((asset) => !fileStore.current.has(asset.id)).map((asset) => `${asset.name}: reload the source file.`);
+    const sourceIssues = activeProject ? [] : chosenAssets.filter((asset) => !fileStore.current.has(asset.id)).map((asset) => `${asset.name}: reload the source file.`);
     const currentIssues = [...new Set([...sealIssues, ...sourceIssues])];
     if (currentIssues.length) {
       const detail = currentIssues.join(" ");
@@ -661,7 +905,15 @@ export function SingleShotApp() {
       setMessage(detail);
       return;
     }
-    const jobId = crypto.randomUUID();
+    const resolvedSeed = seedMode === "random" ? randomSeed() : jobSettings.seed;
+    const resolvedJobDesc = deriveJobDesc(simplePrompt, chosenAssets, jobDesc, verbFamilies);
+    const createdAt = new Date();
+    let managedFiles: Map<string, File>;
+    try { managedFiles = new Map(await Promise.all(chosenAssets.map(async (asset) => [asset.id, await ensureAssetFile(asset)] as const))); }
+    catch (error) { const detail = error instanceof Error ? error.message : "Could not load managed sources."; setSealFeedback(detail); setMessage(detail); return; }
+    const assetHashes = await Promise.all(chosenAssets.map(async (asset) => ({ id: asset.id, sha256: await sha256Hex(managedFiles.get(asset.id)!), trimStart: asset.trimStart, trimEnd: asset.trimEnd })));
+    const resolvedSettings = { ...jobSettings, title: activeProject?.name || jobSettings.title, seed: resolvedSeed };
+    const jobId = await createJobId(resolvedJobDesc, { projectId: activeProject?.id || "legacy", createdAt: createdAt.toISOString(), seed: resolvedSeed, jobDesc: resolvedJobDesc, request: simplePrompt, prompt: generatedPrompt, assets: assetHashes, settings: resolvedSettings });
     const suggestedName = `${jobId}.dummyjob.zip`;
     const savePicker = (window as Window & { showSaveFilePicker?: (options?: { suggestedName?: string; types?: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<SaveFileHandleLike> }).showSaveFilePicker;
     let saveHandle: SaveFileHandleLike | null = null;
@@ -684,14 +936,17 @@ export function SingleShotApp() {
     try {
       const result = await sealJobZip({
         assets: chosenAssets,
-        files: new Map(chosenAssets.flatMap((asset) => { const file = fileStore.current.get(asset.id); return file ? [[asset.id, file] as const] : []; })),
+        files: managedFiles,
         sidecars: new Map(chosenAssets.map((asset) => [asset.id, JSON.stringify(makeReferenceSidecar(asset, settings), null, 2)])),
         prompt: generatedPrompt,
         request: simplePrompt,
         duration: durationSeconds,
-        settings: jobSettings,
+        settings: resolvedSettings,
         subjects: compiled.subjects,
         jobId,
+        projectName: activeProject?.name,
+        jobDesc: resolvedJobDesc,
+        now: createdAt,
       });
       const blob = new Blob([result.bytes.slice().buffer], { type: "application/zip" });
       if (saveHandle) {
@@ -726,14 +981,18 @@ export function SingleShotApp() {
     setMessage("Provider request canceled.");
   }
 
-  async function testProvider() {
-    if (settings.provider === "demo") return setMessage("Demo mode is ready and makes no network calls.");
-    setBusy("test");
+  async function testProvider(silent = false) {
+    if (providerProbeActive.current || (silent && busy)) return;
+    if (settings.provider === "demo") { setProviderStatus("connected"); if (!silent) setMessage("Demo mode is ready and makes no network calls."); return; }
+    if (settings.provider === "openrouter" && !settings.apiKey.trim()) { setProviderStatus("unknown"); return; }
+    providerProbeActive.current = true;
+    if (!silent) setBusy("test");
     try {
       const payload = await postProvider({ action: "test" });
-      setMessage(String(payload.message || "Provider connected."));
-    } catch (error) { setMessage(error instanceof Error ? error.message : "Connection test failed."); }
-    finally { setBusy(null); }
+      setProviderStatus("connected");
+      if (!silent) setMessage(String(payload.message || "Provider connected."));
+    } catch (error) { setProviderStatus("failed"); if (!silent) setMessage(error instanceof Error ? error.message : "Connection test failed."); }
+    finally { providerProbeActive.current = false; if (!silent) setBusy(null); }
   }
 
   function patchPromptTemplate(id: PromptTemplateId, value: string) {
@@ -745,9 +1004,24 @@ export function SingleShotApp() {
     });
   }
 
+  function commitVerbVocabulary(value = verbText) {
+    const parsed = parseVerbVocabulary(value);
+    if (!parsed.length) { setMessage("Verb vocabulary needs at least one ‘lemma: forms’ line."); return; }
+    setVerbFamilies(parsed);
+    localStorage.setItem("dummyplug.verbFamilies.v1", JSON.stringify(parsed));
+    setMessage(`Saved ${parsed.length} verb families for automatic job descriptions.`);
+  }
+
+  function resetVerbVocabulary() {
+    setVerbFamilies(DEFAULT_VERB_FAMILIES);
+    setVerbText(verbVocabularyText(DEFAULT_VERB_FAMILIES));
+    localStorage.removeItem("dummyplug.verbFamilies.v1");
+    setMessage("Restored the default verb vocabulary.");
+  }
+
   return (
     <main className="app-shell">
-      <header className="topbar"><div className="brand-block"><span className="brand-mark" aria-hidden="true"><img src="/dummyplug-head.png" alt="" /></span><div><h1>dummyplug</h1><p>job bundler · MiniMax H3</p></div></div><div className="top-actions"><span className={`provider-state provider-${settings.provider}`}>{settings.provider}</span><button className="heart-button" aria-label="settings" title="settings" onClick={() => setSettingsOpen(true)}><span aria-hidden="true">♥</span></button></div></header>
+      <header className="topbar"><div className="brand-block"><span className="brand-mark" aria-hidden="true"><img src="/dummyplug-head.png" alt="" /></span><div><h1>dummyplug</h1><p>job bundler · MiniMax H3</p></div></div><div className="top-actions"><span className={`provider-state provider-${settings.provider}`}><i className={`provider-dot ${providerStatus}`} aria-hidden="true" />{settings.provider}</span><button className="project-button" onClick={() => setProjectDialogOpen(true)}>{activeProject?.name || "choose project"}</button><button className="heart-button" aria-label="settings" title="settings" onClick={() => setSettingsOpen(true)}><span aria-hidden="true">♥</span></button></div></header>
       <section className="status-strip" aria-live="polite"><span className={busy ? "pulse-dot" : "status-dot"} /><span>{message}</span><span className="status-metrics">{assets.length} assets · {analyzedCount} analyzed · {chosenAssets.length} selected</span></section>
 
       <div className="single-grid">
@@ -755,22 +1029,22 @@ export function SingleShotApp() {
           <div className="panel-head"><div><span className="step-index">01</span><h2>asset library</h2></div><span>{assets.length}</span></div>
           <div className={`drop-zone ${dragging ? "is-dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); void addFiles(event.dataTransfer.files); }}>
             <input ref={fileInputRef} type="file" multiple accept="image/*,video/*,audio/*,.json" onChange={(event) => { if (event.target.files) void addFiles(event.target.files); event.target.value = ""; }} />
-            <button className="drop-picker" onClick={() => void pickReferenceFiles()}><strong>add assets + matching json</strong><span>drop or choose files</span></button>
+            <button className="drop-picker" onClick={() => void pickReferenceFiles()}><strong>import assets + matching json</strong><span>copies files into this project</span></button>
           </div>
-          <div className="source-buttons"><button className="secondary folder-button" onClick={() => void pickReferenceFolder()}>load folder</button><button className="secondary folder-button" disabled={!assets.length} onClick={() => void reloadSources()}>reload sources</button><button className="secondary folder-button analysis-folder-button" onClick={() => void chooseMetadataDirectory()}>{metadataDirectoryName ? `metadata · ${metadataDirectoryName}` : "choose metadata folder"}</button></div>
+          <div className="source-buttons"><button className="secondary folder-button" onClick={() => void pickReferenceFolder()}>import folder</button><button className="secondary folder-button" disabled={!activeProject} onClick={() => void recrawlProject()}>refresh library</button></div>
           <div className="asset-filters"><input value={assetFilterText} onChange={(event) => setAssetFilterText(event.target.value)} placeholder="filter filename or metadata" aria-label="Filter assets by filename or metadata" /><select value={assetFilterKind} onChange={(event) => setAssetFilterKind(event.target.value as "all" | AssetKind)} aria-label="Filter assets by type"><option value="all">all types</option><option value="image">images</option><option value="video">videos</option><option value="audio">audio</option></select></div>
-          <div className="asset-database">
+          <div className="library-view-tabs"><button className={libraryView === "list" ? "active" : ""} onClick={() => setLibraryView("list")}>list</button><button className={libraryView === "folders" ? "active" : ""} onClick={() => setLibraryView("folders")}>folders</button></div>
+          {libraryView === "list" ? <div className="asset-database">
             {visibleAssets.map((asset) => { const index = assets.findIndex((candidate) => candidate.id === asset.id); return <article key={asset.id} className={`db-row ${selectedAsset?.id === asset.id ? "active" : ""}`}>
-              <button type="button" className="asset-check" title="Include in the current job" aria-pressed={asset.selected} onClick={(event) => { event.stopPropagation(); patchAsset(asset.id, { selected: !asset.selected }); }}><span>{asset.selected ? "✓" : ""}</span></button>
+              <button type="button" className="asset-check" title="Include in the current job" aria-pressed={asset.selected} onClick={(event) => { event.stopPropagation(); toggleJobAsset(asset.id); }}><span>{asset.selected ? "✓" : ""}</span></button>
               <button className="db-select" onClick={() => setSelectedAssetId(asset.id)}>
               <div className="db-thumb">{asset.kind === "image" && asset.previewUrl ? <img src={asset.previewUrl} alt="" /> : asset.kind === "video" && asset.previewUrl ? <video src={asset.previewUrl} muted /> : <span>{asset.kind === "audio" ? "♫" : "?"}</span>}<b>{index + 1}</b></div>
               <div className="db-copy"><strong>{asset.canonicalName || asset.name}</strong><span>{asset.role} · {asset.referenceUse} · {asset.analysis ? "vision saved" : "not analyzed"}</span><p>{asset.sourceOf || asset.note || "no source-of authority yet"}</p></div>
               </button>
-              <div className="row-order"><button type="button" disabled={index === 0} onClick={(event) => { event.stopPropagation(); moveAsset(asset.id, -1); }} aria-label={`Move ${asset.name} earlier`}>↑</button><button type="button" disabled={index === assets.length - 1} onClick={(event) => { event.stopPropagation(); moveAsset(asset.id, 1); }} aria-label={`Move ${asset.name} later`}>↓</button></div>
-              <button className="row-remove" onClick={(event) => { event.stopPropagation(); removeAsset(asset.id); }} aria-label={`Remove ${asset.name}`}>×</button>
+              <button className="row-remove" onClick={(event) => { event.stopPropagation(); void removeAsset(asset.id); }} aria-label={`Move ${asset.name} to project trash`}>×</button>
             </article>; })}
             {!assets.length ? <p className="empty-copy">Every image, video, and audio file becomes one durable metadata record.</p> : !visibleAssets.length && <p className="empty-copy">No assets match this filter.</p>}
-          </div>
+          </div> : <FolderLibraryView assets={visibleAssets} folders={libraryFolders} selectedAssetId={selectedAsset?.id || ""} onSelect={setSelectedAssetId} onToggle={toggleJobAsset} onMove={(asset, folder) => organizeAsset("move", asset, folder)} onRename={(asset, name) => organizeAsset("rename", asset, name)} onTrash={(asset) => removeAsset(asset.id)} onCreateFolder={createLibraryFolder} onRemoveFolder={removeLibraryFolder} onMoveFolder={(path, destination) => organizeFolder("move", path, destination)} onRenameFolder={(path, name) => organizeFolder("rename", path, name)} />}
         </aside>
 
         <section className="panel metadata-panel">
@@ -791,33 +1065,26 @@ export function SingleShotApp() {
         </section>
 
         <aside className="panel prompt-panel-single">
-          <div className="panel-head"><div><span className="step-index">03</span><h2>one continuous take</h2></div><span className={validation ? validation.valid ? "validation-ok" : "validation-bad" : "validation-pending"}>{validation ? validation.valid ? "single take valid" : "needs repair" : "not generated"}</span></div>
+          <div className="panel-head"><div><span className="step-index">03</span><h2>job</h2></div><span className={validation ? validation.valid ? "validation-ok" : "validation-bad" : "validation-pending"}>{validation ? validation.valid ? "six-part valid" : "needs repair" : "not generated"}</span></div>
+          <JobAttachmentStrip assets={chosenAssets} onReorder={reorderJobAssets} onRemove={toggleJobAsset} onOpen={setSelectedAssetId} />
+          <label className="job-desc-field"><span>job description</span><input maxLength={30} value={jobDesc} onChange={(event) => setJobDesc(normalizeJobDesc(event.target.value))} placeholder="optional · up to 30 characters" />{!jobDesc.trim() && <small>automatic: {resolvedJobDescPreview}</small>}</label>
           <label className="simple-prompt"><span>simple prompt</span><textarea value={simplePrompt} onChange={(event) => setSimplePrompt(event.target.value)} placeholder="Rabbit and her friend walk from left to right through the attached landscape." /></label>
-          <div className="duration-row"><label>duration <input type="number" min={1} max={20} value={durationSeconds} onChange={(event) => setDurationSeconds(Math.max(1, Math.min(20, Number(event.target.value) || 10)))} /> seconds</label><strong>one shot · no cuts</strong></div>
+          <div className="draft-controls"><label>duration <input type="number" min={1} max={20} value={durationSeconds} onChange={(event) => setDurationSeconds(Math.max(1, Math.min(20, Number(event.target.value) || 10)))} /> seconds</label><label className="seed-mode"><input type="checkbox" checked={seedMode === "random"} onChange={(event) => setSeedMode(event.target.checked ? "random" : "fixed")} />randomize seed when sealing</label>{seedMode === "fixed" && <label>seed <input type="number" min={0} max={Number.MAX_SAFE_INTEGER} value={jobSettings.seed} onChange={(event) => patchJobSettings({ seed: Number(event.target.value) })} /></label>}</div>
+          <div className="project-output-summary"><span>project output</span><strong>{jobSettings.width}×{jobSettings.height} · {jobSettings.fps} fps · {jobSettings.outputContainer}/{jobSettings.audioCodec}</strong><button onClick={() => setProjectDialogOpen(true)}>edit</button></div>
           <div className="task-prefix">[{compiled.taskTypes.join(" + ") || "reference generation"}]</div>
           <div className="attachment-list"><div><strong>resolved subjects + reference labels</strong><span>{compiled.subjects.length} · {compiled.attachments.length}</span></div>{compiled.subjects.map((subject) => <p className="subject-map-row" key={subject.label}><b>{subject.label}</b><span>{subject.canonicalName}</span><em>{subject.attachmentLabels.join(" + ")}</em></p>)}{compiled.attachments.map((attachment) => { const asset = assets.find((item) => item.id === attachment.assetId)!; return <p key={attachment.assetId}><b>{attachment.label}</b><span>{attachment.standaloneEntry ? "standalone entry" : "inside Subject only"}</span><em>{asset.sourceOf || asset.role}</em></p>; })}{!compiled.attachments.length && <p className="attachment-empty">Check assets in the library.</p>}</div>
           {compiled.warnings.length > 0 && <div className="warning-box">{compiled.warnings.map((warning) => <p key={warning}>△ {warning}</p>)}</div>}
-          <button className="primary generate-single" disabled={Boolean(busy) || !simplePrompt.trim() || !chosenAssets.length} onClick={() => void generatePrompt()}>{busy === "generate" ? "writing one continuous take…" : "generate six-part prompt"}</button>
+          <button className="primary generate-single" disabled={Boolean(busy) || !simplePrompt.trim() || !chosenAssets.length} onClick={() => void generatePrompt()}>{busy === "generate" ? "writing prompt…" : "generate six-part prompt"}</button>
           {promptHistory.length > 0 && <label className="prompt-history"><span>recent generated versions</span><select value="" onChange={(event) => { const remembered = promptHistory[Number(event.target.value)]; if (remembered) setGeneratedPrompt(remembered); }}><option value="" disabled>restore one of the last {promptHistory.length}</option>{promptHistory.map((prompt, index) => <option value={index} key={`${index}-${prompt.slice(0, 24)}`}>version {index + 1} · {prompt.replace(/\s+/g, " ").slice(0, 52)}</option>)}</select></label>}
           <textarea className="prompt-output single-output" value={generatedPrompt} onChange={(event) => setGeneratedPrompt(event.target.value)} placeholder="The expanded six-part H3 prompt appears here. It will contain exactly one [Shot 1]." spellCheck={false} />
-          <details className="job-controls" open><summary>job seal settings <span>{jobSettings.width}×{jobSettings.height} · {jobSettings.fps} fps</span></summary><div className="preset-row"><button type="button" onClick={() => patchJobSettings({ width: 768, height: 1344 })}>portrait</button><button type="button" onClick={() => patchJobSettings({ width: 1344, height: 768 })}>landscape</button><button type="button" onClick={() => patchJobSettings({ width: 1024, height: 1024 })}>square</button></div><div className="job-control-grid">
-            <label className="wide"><span>job title</span><input value={jobSettings.title} onChange={(event) => patchJobSettings({ title: event.target.value })} placeholder="optional" /></label>
-            <label><span>width</span><input type="number" min={64} max={8192} value={jobSettings.width} onChange={(event) => patchJobSettings({ width: Number(event.target.value) })} /></label><label><span>height</span><input type="number" min={64} max={8192} value={jobSettings.height} onChange={(event) => patchJobSettings({ height: Number(event.target.value) })} /></label>
-            <label><span>fps</span><input type="number" min={1} max={120} value={jobSettings.fps} onChange={(event) => patchJobSettings({ fps: Number(event.target.value) })} /></label><label><span>steps</span><input type="number" min={1} max={200} value={jobSettings.steps} onChange={(event) => patchJobSettings({ steps: Number(event.target.value) })} /></label>
-            <label className="wide seed-control"><span>seed</span><input type="number" min={0} max={Number.MAX_SAFE_INTEGER} value={jobSettings.seed} onChange={(event) => patchJobSettings({ seed: Number(event.target.value) })} /><button type="button" onClick={() => patchJobSettings({ seed: randomSeed() })}>randomize</button></label>
-            <label className="wide"><span>sampler</span><input value={jobSettings.sampler} onChange={(event) => patchJobSettings({ sampler: event.target.value })} /></label>
-            <label><span>shift video</span><input type="number" step={0.1} value={jobSettings.shiftVideo} onChange={(event) => patchJobSettings({ shiftVideo: Number(event.target.value) })} /></label><label><span>shift audio</span><input type="number" step={0.1} value={jobSettings.shiftAudio} onChange={(event) => patchJobSettings({ shiftAudio: Number(event.target.value) })} /></label>
-            <label><span>reference image size</span><select value={jobSettings.refImageSize} onChange={(event) => patchJobSettings({ refImageSize: event.target.value as JobSettings["refImageSize"] })}><option value="match">match</option><option value="max">max</option></select></label><label><span>input scaling</span><select value={jobSettings.inputScaling} onChange={(event) => patchJobSettings({ inputScaling: event.target.value as JobSettings["inputScaling"] })}>{DIRECTOR_INPUT_SCALING_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><label><span>workflow</span><select value={jobSettings.workflowPreset} onChange={(event) => patchJobSettings({ workflowPreset: event.target.value as JobSettings["workflowPreset"] })}><option value="dasiwa-ref2va:v1">dasiwa-ref2va:v1</option></select></label>
-            <label><span>container</span><select value={jobSettings.outputContainer} onChange={(event) => patchJobSettings({ outputContainer: event.target.value })}><option>Auto</option><option>mp4</option><option>mov</option><option>mkv</option></select></label><label><span>codec</span><select value={jobSettings.outputCodec} onChange={(event) => patchJobSettings({ outputCodec: event.target.value })}><option>Auto</option><option>h264</option><option>hevc</option><option>prores</option></select></label>
-            <label title="Video encoder CRF/CQ. Lower values preserve more quality and produce larger files."><span>video quality (CRF/CQ)</span><input type="number" min={0} max={51} value={jobSettings.outputQuality} onChange={(event) => patchJobSettings({ outputQuality: Number(event.target.value) })} /></label><label><span>audio codec</span><select value={jobSettings.audioCodec} onChange={(event) => patchJobSettings({ audioCodec: event.target.value })}><option>Auto</option><option>aac</option><option>opus</option><option>pcm_s16le</option></select></label>
-            <label className="wide"><span>audio bitrate</span><select value={jobSettings.audioBitrate} onChange={(event) => patchJobSettings({ audioBitrate: event.target.value })}><option>96k</option><option>128k</option><option>192k</option><option>256k</option><option>320k</option></select></label>
-          </div></details>
           <div className={`seal-feedback ${sealIssues.length ? "error" : sealFeedback ? "active" : "ready"}`} aria-live="polite">{sealIssues.length ? sealIssues[0] : sealFeedback || "Ready to hash and seal this immutable job."}</div>
           <div className="single-actions"><button className="secondary" disabled={!generatedPrompt} onClick={() => void navigator.clipboard.writeText(generatedPrompt).then(() => setMessage("Prompt copied."))}>copy prompt</button><button className="primary" disabled={!generatedPrompt || busy === "export"} onClick={() => void sealBundle()}>{busy === "export" ? "hashing + sealing…" : "seal job zip"}</button></div>
         </aside>
       </div>
 
-      {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="settings-sheet" role="dialog" aria-modal="true"><div className="settings-head"><div><span className="heart-large">♥</span><div><h2>{settingsPage === "connection" ? "model connections" : "system prompts"}</h2><p>{settingsPage === "connection" ? "Two models: vision metadata and prompt expansion." : "The exact recipes used by this reduced workflow."}</p></div></div><button onClick={() => setSettingsOpen(false)} aria-label="Close settings">×</button></div><nav className="inline-settings-tabs"><button className={settingsPage === "connection" ? "active" : ""} onClick={() => setSettingsPage("connection")}>connection</button><button className={settingsPage === "prompts" ? "active" : ""} onClick={() => setSettingsPage("prompts")}>prompts</button></nav>{settingsPage === "connection" ? <>
+      <ProjectDialog open={projectDialogOpen} projects={projects} activeProjectId={activeProject?.id || ""} activeProjectName={activeProject?.name || ""} activeProjectPath={activeProject ? `${projectRoot.replace(/[\\/]$/, "")}\\${activeProject.name}` : projectRoot} settings={activeProject?.outputSettings || DEFAULT_PROJECT_OUTPUT_SETTINGS} onClose={() => setProjectDialogOpen(false)} onSelect={(id) => { void openProject(id).catch((error) => setMessage(error instanceof Error ? error.message : "Could not open the project.")); }} onCreate={createAndOpenProject} legacyAssetCount={legacyAssetCount} onMigrate={migrateLegacyWorkspace} onSettingsChange={(patch) => void patchProjectOutputSettings(patch)} />
+
+      {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="settings-sheet" role="dialog" aria-modal="true"><div className="settings-head"><div><span className="heart-large">♥</span><div><h2>{settingsPage === "connection" ? "model connections" : settingsPage === "prompts" ? "system prompts" : "job naming"}</h2><p>{settingsPage === "connection" ? "Two models: vision metadata and prompt expansion." : settingsPage === "prompts" ? "The exact recipes used by this reduced workflow." : "Editable verb families used by automatic job descriptions."}</p></div></div><button onClick={() => setSettingsOpen(false)} aria-label="Close settings">×</button></div><nav className="inline-settings-tabs settings-tabs-three"><button className={settingsPage === "connection" ? "active" : ""} onClick={() => setSettingsPage("connection")}>connection</button><button className={settingsPage === "prompts" ? "active" : ""} onClick={() => setSettingsPage("prompts")}>prompts</button><button className={settingsPage === "naming" ? "active" : ""} onClick={() => setSettingsPage("naming")}>naming</button></nav>{settingsPage === "connection" ? <>
         <div className={`settings-status ${busy ? "active" : ""}`} aria-live="polite"><strong>{busy === "test" ? "testing OpenRouter…" : busy ? "request running…" : "provider status"}</strong><p>{message}</p></div>
         <label className="field"><span>provider</span><select value={settings.provider} onChange={(event) => setSettings({ ...settings, provider: event.target.value as ModelSettings["provider"] })}><option value="demo">offline demo</option><option value="openrouter">OpenRouter</option><option value="local">local OpenAI-compatible server</option></select></label>
         {settings.provider === "local" && <label className="field"><span>server address</span><input value={settings.baseUrl} onChange={(event) => setSettings({ ...settings, baseUrl: event.target.value })} /></label>}
@@ -828,7 +1095,7 @@ export function SingleShotApp() {
         {settings.provider !== "demo" && <label className="check-field"><input type="checkbox" checked={settings.rememberKey} onChange={(event) => setSettings({ ...settings, rememberKey: event.target.checked })} /><span>remember key in this browser profile</span></label>}
         <label className="field"><span>temperature <output>{settings.temperature.toFixed(1)}</output></span><input type="range" min="0" max="1" step="0.1" disabled={settings.provider === "demo"} value={settings.temperature} onChange={(event) => setSettings({ ...settings, temperature: Number(event.target.value) })} /></label>
         <div className="settings-actions"><button className="secondary" onClick={() => setSettings(DEFAULT_SETTINGS)}>reset models</button><button className="secondary request-reset" onClick={cancelRequest}>{busy ? "cancel request" : "reset request"}</button><button className="secondary" disabled={Boolean(busy)} onClick={() => void testProvider()}>{busy === "test" ? "testing…" : "test"}</button><button className="primary" onClick={() => setSettingsOpen(false)}>done</button></div>
-      </> : <><div className="prompt-registry-intro"><strong>DaSiWa single-take recipes</strong><p>Vision recipes create durable asset evidence. The final recipe applies the official full-reference label roles while expanding one request into one uninterrupted take.</p><button className="secondary" onClick={() => setPromptOverrides({})}>reset to defaults</button></div><div className="prompt-registry">{EXPOSED_PROMPT_TEMPLATES.map((item) => <article className="system-prompt-card" key={item.id}><div className="system-prompt-head"><div><h3>{item.title}</h3><span>{item.modelRole}</span></div><button className="secondary" onClick={() => { void navigator.clipboard.writeText(promptOverrides[item.id] ?? item.template); setCopiedPromptId(item.id); window.setTimeout(() => setCopiedPromptId(null), 1200); }}>{copiedPromptId === item.id ? "copied" : "copy"}</button></div><p>{item.description}</p><textarea value={promptOverrides[item.id] ?? item.template} onChange={(event) => patchPromptTemplate(item.id, event.target.value)} spellCheck={false} /></article>)}</div></>}
+      </> : settingsPage === "prompts" ? <><div className="prompt-registry-intro"><strong>DaSiWa single-take recipes</strong><p>Vision recipes create durable asset evidence. The final recipe applies the official full-reference label roles while expanding one request into one uninterrupted take.</p><button className="secondary" onClick={() => setPromptOverrides({})}>reset to defaults</button></div><div className="prompt-registry">{EXPOSED_PROMPT_TEMPLATES.map((item) => <article className="system-prompt-card" key={item.id}><div className="system-prompt-head"><div><h3>{item.title}</h3><span>{item.modelRole}</span></div><button className="secondary" onClick={() => { void navigator.clipboard.writeText(promptOverrides[item.id] ?? item.template); setCopiedPromptId(item.id); window.setTimeout(() => setCopiedPromptId(null), 1200); }}>{copiedPromptId === item.id ? "copied" : "copy"}</button></div><p>{item.description}</p><textarea value={promptOverrides[item.id] ?? item.template} onChange={(event) => patchPromptTemplate(item.id, event.target.value)} spellCheck={false} /></article>)}</div></> : <div className="naming-settings"><p>One family per line: <code>walk: walk, walks, walked, walking</code>. “to be” is deliberately excluded.</p><textarea value={verbText} onChange={(event) => setVerbText(event.target.value)} onBlur={() => commitVerbVocabulary()} spellCheck={false} /><div><button className="secondary" onClick={resetVerbVocabulary}>reset vocabulary</button><button className="primary" onClick={() => commitVerbVocabulary()}>save vocabulary</button></div></div>}
       </section></div>}
     </main>
   );

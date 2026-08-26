@@ -19,7 +19,8 @@ test("server-renders the dummyplug workspace", async () => {
   assert.match(html, /dummyplug/);
   assert.match(html, /settings/);
   assert.match(html, /asset library/i);
-  assert.match(html, /one continuous take/i);
+  assert.match(html, /choose project/i);
+  assert.match(html, />job</i);
 });
 
 test("exposes the local provider bridge health route", async () => {

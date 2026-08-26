@@ -4,6 +4,7 @@ import { defineConfig, type Plugin } from "vite";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import hostingConfig from "./.openai/hosting.json";
 import { POST as handleProviderRequest } from "./app/api/provider/route";
+import { createProjectLibraryMiddleware } from "./lib/project-library-middleware";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
@@ -82,6 +83,15 @@ function localProviderBridge(): Plugin {
   };
 }
 
+function localProjectLibraryBridge(): Plugin {
+  const middleware = createProjectLibraryMiddleware();
+  return {
+    name: "dummyplug-project-library-bridge",
+    configureServer(server) { server.middlewares.use("/library-bridge", middleware); },
+    configurePreviewServer(server) { server.middlewares.use("/library-bridge", middleware); },
+  };
+}
+
 export default defineConfig(async () => {
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
@@ -104,6 +114,7 @@ export default defineConfig(async () => {
     },
     plugins: [
       localProviderBridge(),
+      localProjectLibraryBridge(),
       vinext(),
       sites(),
       cloudflare({

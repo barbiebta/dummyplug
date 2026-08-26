@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "dummyplug",
-  description: "Durable reference metadata and one continuous MiniMax H3 take.",
+  description: "Project asset libraries and self-contained MiniMax H3 job bundles.",
   icons: {
     icon: "/dummyplug-head.png",
     shortcut: "/dummyplug-head.png",

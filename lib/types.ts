@@ -30,6 +30,11 @@ export interface ModelSettings {
 export interface AssetRecord {
   id: string;
   name: string;
+  /** POSIX path relative to the current project's assets directory. */
+  relativePath?: string;
+  /** Stable import chronology owned by the project library. */
+  importedAt?: string;
+  sha256?: string;
   kind: AssetKind;
   size: number;
   lastModified?: number;

@@ -16,6 +16,10 @@ export interface SealJobInput {
   subjects: SubjectSpec[];
   now?: Date;
   jobId?: string;
+  /** Human-readable project title copied into the immutable manifest. */
+  projectName?: string;
+  /** Human-readable per-job description used to derive the job ID. */
+  jobDesc?: string;
 }
 
 export const DEFAULT_JOB_SETTINGS: JobSettings = {
@@ -173,10 +177,11 @@ export async function sealJobZip(input: SealJobInput) {
 
   const [template, versionText] = input.settings.workflowPreset.split(":v");
   const manifest = {
-    schema: "dummyplug.h3-job.v1",
+    schema: "dummyplug.h3-job.v2",
     job_id: jobId,
+    job_desc: input.jobDesc?.trim() || input.settings.title.trim() || "untitled job",
     created_at: createdAt,
-    ...(input.settings.title.trim() ? { title: input.settings.title.trim() } : {}),
+    ...(input.projectName?.trim() || input.settings.title.trim() ? { title: input.projectName?.trim() || input.settings.title.trim() } : {}),
     workflow: { template, version: Number(versionText) },
     generation: {
       width: input.settings.width,
