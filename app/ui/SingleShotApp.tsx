@@ -5,10 +5,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { loadBrowserWorkspace, saveBrowserWorkspace, type PersistedDirectoryHandle, type PersistedFileHandle, type PersistedWorkspace } from "../../lib/browser-workspace";
-import { DEFAULT_JOB_SETTINGS, randomSeed, sealJobZip, validateJobSettings, validateVideoTrim } from "../../lib/job-bundle";
+import { DEFAULT_JOB_SETTINGS, normalizeJobSettings, randomSeed, sealJobZip, validateJobSettings, validateVideoTrim } from "../../lib/job-bundle";
 import { makeReferenceSidecar, readReferenceSidecar, sidecarMatchKey, sidecarName } from "../../lib/reference-sidecar";
 import { compileAttachments, makeDemoAnalysis, validateSingleShotPrompt } from "../../lib/single-h3";
 import { DEFAULT_PROMPT_TEMPLATES, EXPOSED_PROMPT_TEMPLATES, type PromptTemplateId, type PromptTemplateMap } from "../../lib/single-prompts";
+import { DIRECTOR_INPUT_SCALING_OPTIONS } from "../../lib/types";
 import type { AssetKind, AssetRecord, AssetRole, JobSettings, ModelSettings, PreparedReference, ReferenceUse } from "../../lib/types";
 
 const DEFAULT_SETTINGS: ModelSettings = {
@@ -275,7 +276,7 @@ export function SingleShotApp() {
         setSelectedAssetId(saved.selectedAssetId || restored[0]?.id || "");
         setSimplePrompt(saved.simplePrompt || "");
         setDurationSeconds(Math.max(1, Math.min(20, saved.durationSeconds || 10)));
-        setJobSettings({ ...DEFAULT_JOB_SETTINGS, ...(saved.jobSettings || {}) });
+        setJobSettings(normalizeJobSettings(saved.jobSettings));
         setGeneratedPrompt(saved.generatedPrompt || "");
         setPromptHistory((saved.promptHistory || []).filter(Boolean).slice(0, 5));
         if (restored.length) setMessage(`Restored ${restored.length} asset${restored.length === 1 ? "" : "s"} from the new single-shot workspace.`);
@@ -806,7 +807,7 @@ export function SingleShotApp() {
             <label className="wide seed-control"><span>seed</span><input type="number" min={0} max={Number.MAX_SAFE_INTEGER} value={jobSettings.seed} onChange={(event) => patchJobSettings({ seed: Number(event.target.value) })} /><button type="button" onClick={() => patchJobSettings({ seed: randomSeed() })}>randomize</button></label>
             <label className="wide"><span>sampler</span><input value={jobSettings.sampler} onChange={(event) => patchJobSettings({ sampler: event.target.value })} /></label>
             <label><span>shift video</span><input type="number" step={0.1} value={jobSettings.shiftVideo} onChange={(event) => patchJobSettings({ shiftVideo: Number(event.target.value) })} /></label><label><span>shift audio</span><input type="number" step={0.1} value={jobSettings.shiftAudio} onChange={(event) => patchJobSettings({ shiftAudio: Number(event.target.value) })} /></label>
-            <label><span>input scaling</span><select value={jobSettings.inputScaling} onChange={(event) => patchJobSettings({ inputScaling: event.target.value })}><option value="match">match</option><option value="fit">fit</option><option value="fill">fill</option><option value="native">native</option><option value="720">720px</option><option value="1024">1024px</option></select></label><label><span>workflow</span><select value={jobSettings.workflowPreset} onChange={(event) => patchJobSettings({ workflowPreset: event.target.value as JobSettings["workflowPreset"] })}><option value="dasiwa-ref2va:v1">dasiwa-ref2va:v1</option></select></label>
+            <label><span>reference image size</span><select value={jobSettings.refImageSize} onChange={(event) => patchJobSettings({ refImageSize: event.target.value as JobSettings["refImageSize"] })}><option value="match">match</option><option value="max">max</option></select></label><label><span>input scaling</span><select value={jobSettings.inputScaling} onChange={(event) => patchJobSettings({ inputScaling: event.target.value as JobSettings["inputScaling"] })}>{DIRECTOR_INPUT_SCALING_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><label><span>workflow</span><select value={jobSettings.workflowPreset} onChange={(event) => patchJobSettings({ workflowPreset: event.target.value as JobSettings["workflowPreset"] })}><option value="dasiwa-ref2va:v1">dasiwa-ref2va:v1</option></select></label>
             <label><span>container</span><select value={jobSettings.outputContainer} onChange={(event) => patchJobSettings({ outputContainer: event.target.value })}><option>Auto</option><option>mp4</option><option>mov</option><option>mkv</option></select></label><label><span>codec</span><select value={jobSettings.outputCodec} onChange={(event) => patchJobSettings({ outputCodec: event.target.value })}><option>Auto</option><option>h264</option><option>hevc</option><option>prores</option></select></label>
             <label title="Video encoder CRF/CQ. Lower values preserve more quality and produce larger files."><span>video quality (CRF/CQ)</span><input type="number" min={0} max={51} value={jobSettings.outputQuality} onChange={(event) => patchJobSettings({ outputQuality: Number(event.target.value) })} /></label><label><span>audio codec</span><select value={jobSettings.audioCodec} onChange={(event) => patchJobSettings({ audioCodec: event.target.value })}><option>Auto</option><option>aac</option><option>opus</option><option>pcm_s16le</option></select></label>
             <label className="wide"><span>audio bitrate</span><select value={jobSettings.audioBitrate} onChange={(event) => patchJobSettings({ audioBitrate: event.target.value })}><option>96k</option><option>128k</option><option>192k</option><option>256k</option><option>320k</option></select></label>

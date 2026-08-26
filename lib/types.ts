@@ -3,6 +3,19 @@ export type ProviderKind = "demo" | "openrouter" | "local";
 export type AssetRole = "character" | "setting" | "style" | "motion" | "prop" | "audio" | "general";
 export type ReferenceUse = "subject" | "frame-anchor" | "video-structure" | "video-edit" | "video-continuation" | "audio-reference" | "audio-copy";
 
+export const DIRECTOR_INPUT_SCALING_OPTIONS = [
+  { value: "Off", label: "Off" },
+  { value: "Auto", label: "Native (ShortEdge 2048px)" },
+  { value: "Target", label: "Target · Selected Aspect & Resolution" },
+  { value: "Fit", label: "Fit" },
+  { value: "Fill and crop", label: "Fill and crop" },
+  { value: "Fit and pad", label: "Fit and pad" },
+  { value: "Long side with divisible crop", label: "Long side with divisible crop" },
+] as const;
+
+export type DirectorInputScaling = (typeof DIRECTOR_INPUT_SCALING_OPTIONS)[number]["value"];
+export type RefImageSize = "match" | "max";
+
 export interface ModelSettings {
   provider: ProviderKind;
   visionModel: string;
@@ -38,6 +51,7 @@ export interface AssetRecord {
 }
 
 export interface JobSettings {
+  defaultsVersion: number;
   title: string;
   width: number;
   height: number;
@@ -47,7 +61,8 @@ export interface JobSettings {
   sampler: string;
   shiftVideo: number;
   shiftAudio: number;
-  inputScaling: string;
+  refImageSize: RefImageSize;
+  inputScaling: DirectorInputScaling;
   outputContainer: string;
   outputCodec: string;
   outputQuality: number;

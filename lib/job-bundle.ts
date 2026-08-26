@@ -1,5 +1,6 @@
 import JSZip from "jszip";
 import { compileAttachments, validateSingleShotPrompt } from "./single-h3.ts";
+import { DIRECTOR_INPUT_SCALING_OPTIONS } from "./types.ts";
 import type { AssetRecord, JobSettings, SubjectSpec } from "./types.ts";
 
 type BinarySource = Blob | ArrayBuffer | Uint8Array;
@@ -18,6 +19,7 @@ export interface SealJobInput {
 }
 
 export const DEFAULT_JOB_SETTINGS: JobSettings = {
+  defaultsVersion: 2,
   title: "",
   width: 768,
   height: 1344,
@@ -27,14 +29,49 @@ export const DEFAULT_JOB_SETTINGS: JobSettings = {
   sampler: "res_multistep",
   shiftVideo: 12,
   shiftAudio: 3,
-  inputScaling: "match",
-  outputContainer: "Auto",
+  refImageSize: "max",
+  inputScaling: "Auto",
+  outputContainer: "mp4",
   outputCodec: "Auto",
   outputQuality: 21,
-  audioCodec: "Auto",
+  audioCodec: "aac",
   audioBitrate: "192k",
   workflowPreset: "dasiwa-ref2va:v1",
 };
+
+const DIRECTOR_INPUT_SCALING_VALUES = new Set<string>(DIRECTOR_INPUT_SCALING_OPTIONS.map((option) => option.value));
+const LEGACY_INPUT_SCALING: Record<string, JobSettings["inputScaling"]> = {
+  match: "Auto",
+  max: "Auto",
+  native: "Auto",
+  fit: "Fit",
+  fill: "Fill and crop",
+  "720": "Auto",
+  "1024": "Auto",
+  "Native (ShortEdge 2048px)": "Auto",
+  "Target · Selected Aspect & Resolution": "Target",
+};
+
+export function normalizeJobSettings(saved?: unknown): JobSettings {
+  const raw = saved && typeof saved === "object" ? saved as Record<string, unknown> : {};
+  const migrateOutputDefaults = Number(raw.defaultsVersion || 0) < DEFAULT_JOB_SETTINGS.defaultsVersion;
+  const rawScaling = String(raw.inputScaling ?? DEFAULT_JOB_SETTINGS.inputScaling);
+  let inputScaling = DIRECTOR_INPUT_SCALING_VALUES.has(rawScaling)
+    ? rawScaling as JobSettings["inputScaling"]
+    : LEGACY_INPUT_SCALING[rawScaling] || DEFAULT_JOB_SETTINGS.inputScaling;
+  const legacyRefImageSize = rawScaling === "match" || rawScaling === "max" ? rawScaling : undefined;
+  const rawRefImageSize = String(raw.refImageSize ?? legacyRefImageSize ?? DEFAULT_JOB_SETTINGS.refImageSize);
+  let refImageSize: JobSettings["refImageSize"] = rawRefImageSize === "max" ? "max" : "match";
+  let outputContainer = String(raw.outputContainer ?? DEFAULT_JOB_SETTINGS.outputContainer);
+  let audioCodec = String(raw.audioCodec ?? DEFAULT_JOB_SETTINGS.audioCodec);
+  if (migrateOutputDefaults) {
+    if (["match", "max", "native", "Auto"].includes(rawScaling)) inputScaling = DEFAULT_JOB_SETTINGS.inputScaling;
+    if (raw.refImageSize == null || rawRefImageSize === "match") refImageSize = DEFAULT_JOB_SETTINGS.refImageSize;
+    if (raw.outputContainer == null || ["Auto", "webm"].includes(outputContainer)) outputContainer = DEFAULT_JOB_SETTINGS.outputContainer;
+    if (raw.audioCodec == null || ["Auto", "opus"].includes(audioCodec)) audioCodec = DEFAULT_JOB_SETTINGS.audioCodec;
+  }
+  return { ...DEFAULT_JOB_SETTINGS, ...raw, defaultsVersion: DEFAULT_JOB_SETTINGS.defaultsVersion, refImageSize, inputScaling, outputContainer, audioCodec } as JobSettings;
+}
 
 export function randomSeed() {
   const words = new Uint32Array(2);
@@ -61,6 +98,8 @@ export function validateJobSettings(settings: JobSettings, duration: number) {
   if (!Number.isInteger(settings.steps) || settings.steps < 1 || settings.steps > 200) errors.push("Steps must be from 1 to 200.");
   if (!Number.isFinite(settings.shiftVideo)) errors.push("shift_video must be a finite number.");
   if (!Number.isFinite(settings.shiftAudio)) errors.push("shift_audio must be a finite number.");
+  if (settings.refImageSize !== "match" && settings.refImageSize !== "max") errors.push("Reference image size must be match or max.");
+  if (!DIRECTOR_INPUT_SCALING_VALUES.has(settings.inputScaling)) errors.push("Input scaling must be one of Director's supported modes.");
   if (!Number.isFinite(settings.outputQuality) || settings.outputQuality < 0 || settings.outputQuality > 51) errors.push("Video quality (CRF/CQ) must be from 0 to 51; lower values preserve more quality.");
   if (!settings.sampler.trim()) errors.push("Sampler is required.");
   return errors;
@@ -149,6 +188,7 @@ export async function sealJobZip(input: SealJobInput) {
       sampler: input.settings.sampler,
       shift_video: input.settings.shiftVideo,
       shift_audio: input.settings.shiftAudio,
+      ref_image_size: input.settings.refImageSize,
       input_scaling: input.settings.inputScaling,
       output: {
         container: input.settings.outputContainer,

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import JSZip from "jszip";
-import { DEFAULT_JOB_SETTINGS, randomSeed, sealJobZip, sha256Hex, validateVideoTrim } from "../lib/job-bundle.ts";
+import { DEFAULT_JOB_SETTINGS, normalizeJobSettings, randomSeed, sealJobZip, sha256Hex, validateJobSettings, validateVideoTrim } from "../lib/job-bundle.ts";
 import { compileAttachments } from "../lib/single-h3.ts";
+import { DIRECTOR_INPUT_SCALING_OPTIONS } from "../lib/types.ts";
 
 const base = { size: 4, previewUrl: "blob:test", selected: true, note: "", analysis: undefined, missingFile: false, role: "general", referenceUse: "subject", sourceOf: "visual authority" };
 const assets = [
@@ -41,6 +42,52 @@ test("fixed and randomized seeds resolve to safe integers", () => {
     assert.equal(Number.isSafeInteger(seed), true);
     assert.ok(seed >= 0);
   }
+});
+
+test("input scaling exactly mirrors MiniMax H3 Director", () => {
+  assert.deepEqual(DIRECTOR_INPUT_SCALING_OPTIONS.map((option) => option.value), [
+    "Off",
+    "Auto",
+    "Target",
+    "Fit",
+    "Fill and crop",
+    "Fit and pad",
+    "Long side with divisible crop",
+  ]);
+  assert.equal(DEFAULT_JOB_SETTINGS.refImageSize, "max");
+  assert.equal(DEFAULT_JOB_SETTINGS.inputScaling, "Auto");
+  assert.equal(DEFAULT_JOB_SETTINGS.outputContainer, "mp4");
+  assert.equal(DEFAULT_JOB_SETTINGS.audioCodec, "aac");
+  for (const { value } of DIRECTOR_INPUT_SCALING_OPTIONS) {
+    assert.deepEqual(validateJobSettings({ ...DEFAULT_JOB_SETTINGS, inputScaling: value }, 5), []);
+  }
+  assert.match(validateJobSettings({ ...DEFAULT_JOB_SETTINGS, inputScaling: "native" }, 5).join(" "), /Input scaling/);
+});
+
+test("legacy combined scaling selections migrate to split settings", () => {
+  assert.deepEqual(
+    { refImageSize: normalizeJobSettings({ inputScaling: "match" }).refImageSize, inputScaling: normalizeJobSettings({ inputScaling: "match" }).inputScaling },
+    { refImageSize: "max", inputScaling: "Auto" },
+  );
+  assert.deepEqual(
+    { refImageSize: normalizeJobSettings({ inputScaling: "max" }).refImageSize, inputScaling: normalizeJobSettings({ inputScaling: "max" }).inputScaling },
+    { refImageSize: "max", inputScaling: "Auto" },
+  );
+  assert.equal(normalizeJobSettings({ inputScaling: "native" }).inputScaling, "Auto");
+  assert.equal(normalizeJobSettings({ inputScaling: "fit" }).inputScaling, "Fit");
+  assert.equal(normalizeJobSettings({ inputScaling: "fill" }).inputScaling, "Fill and crop");
+  assert.deepEqual(
+    (({ refImageSize, inputScaling, outputContainer, audioCodec }) => ({ refImageSize, inputScaling, outputContainer, audioCodec }))(
+      normalizeJobSettings({ defaultsVersion: 1, refImageSize: "match", inputScaling: "Auto", outputContainer: "webm", audioCodec: "opus" }),
+    ),
+    { refImageSize: "max", inputScaling: "Auto", outputContainer: "mp4", audioCodec: "aac" },
+  );
+  assert.deepEqual(
+    (({ refImageSize, inputScaling, outputContainer, audioCodec }) => ({ refImageSize, inputScaling, outputContainer, audioCodec }))(
+      normalizeJobSettings({ defaultsVersion: 2, refImageSize: "match", inputScaling: "Fit", outputContainer: "mov", audioCodec: "opus" }),
+    ),
+    { refImageSize: "match", inputScaling: "Fit", outputContainer: "mov", audioCodec: "opus" },
+  );
 });
 
 test("video trim validation enforces known source duration", () => {
@@ -96,8 +143,8 @@ test("seals an independently verifiable REF2VA job archive", async () => {
   assert.equal(manifest.job_id, "11111111-2222-4333-8444-555555555555");
   assert.deepEqual(manifest.workflow, { template: "dasiwa-ref2va", version: 1 });
   assert.deepEqual(manifest.generation, {
-    width: 768, height: 1344, duration: 5, fps: 24, seed: 123456, steps: 25, sampler: "res_multistep", shift_video: 12, shift_audio: 3, input_scaling: "match",
-    output: { container: "Auto", codec: "Auto", quality: 21, audio_codec: "Auto", audio_bitrate: "192k" },
+    width: 768, height: 1344, duration: 5, fps: 24, seed: 123456, steps: 25, sampler: "res_multistep", shift_video: 12, shift_audio: 3, ref_image_size: "max", input_scaling: "Auto",
+    output: { container: "mp4", codec: "Auto", quality: 21, audio_codec: "aac", audio_bitrate: "192k" },
   });
   assert.deepEqual(manifest.references.map(({ asset_id, order, label }) => ({ asset_id, order, label })), [
     { asset_id: "portrait", order: 0, label: "<Picture 1>" },
