@@ -1,4 +1,4 @@
-import type { AssetRole, DirectorInputScaling, ReferenceUse, RefImageSize } from "./types.ts";
+import type { AssetRole, CharacterPromptPolicy, DirectorInputScaling, ReferenceUse, RefImageSize } from "./types.ts";
 
 /** The on-disk project format. It deliberately contains no provider credentials. */
 export const PROJECT_SCHEMA = "dummyplug.project.v1";
@@ -22,10 +22,11 @@ export interface ProjectOutputSettings {
   audioCodec: string;
   audioBitrate: string;
   workflowPreset: "dasiwa-ref2va:v1";
+  characterPolicy: CharacterPromptPolicy;
 }
 
 export const DEFAULT_PROJECT_OUTPUT_SETTINGS: ProjectOutputSettings = {
-  defaultsVersion: 2,
+  defaultsVersion: 3,
   width: 768,
   height: 1344,
   fps: 24,
@@ -41,6 +42,10 @@ export const DEFAULT_PROJECT_OUTPUT_SETTINGS: ProjectOutputSettings = {
   audioCodec: "aac",
   audioBitrate: "192k",
   workflowPreset: "dasiwa-ref2va:v1",
+  characterPolicy: {
+    allCharactersTransgenderWomen: true,
+    allowedVocabulary: { man: false, woman: true, trans: true, futa: true },
+  },
 };
 
 export interface ProjectManifest {
@@ -116,6 +121,7 @@ export interface ProjectAsset {
   sha256?: string;
   /** Directly maps to the existing AssetRecord tagging fields in the UI. */
   canonicalName: string;
+  declaredIdentity: string;
   role: AssetRole;
   referenceUse: ReferenceUse;
   sourceOf: string;
@@ -130,6 +136,7 @@ export interface ProjectAsset {
 
 export interface ProjectAssetMetadata {
   canonicalName: string;
+  declaredIdentity: string;
   role: AssetRole;
   referenceUse: ReferenceUse;
   sourceOf: string;

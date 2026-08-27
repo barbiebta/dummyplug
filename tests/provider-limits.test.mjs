@@ -52,14 +52,16 @@ test("local vision analysis preserves its channel through the provider response"
   let observed;
   globalThis.fetch = async (_url, init) => {
     observed = JSON.parse(String(init?.body));
-    return Response.json({ choices: [{ message: { content: JSON.stringify({ summary: "Direct local evidence.", subjects: ["Rabbit"], continuityLocks: ["body state"] }) } }] });
+    return Response.json({ choices: [{ message: { content: `${JSON.stringify({ visibleBody: "Direct local evidence.", presentation: "feminine", clothingAndExposure: "clothed", contactAndSexualState: "none", fluidsAndObjects: "none", uncertainties: [], focusFindings: [] })}\nJoyCaption trailing note` } }] });
   };
   try {
-    const response = await POST(new Request("http://localhost/api/provider", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "analyze", settings: { ...settings, provider: "local", baseUrl: "http://127.0.0.1:8080", visionModel: "local-vision" }, references: [{ assetId: "rabbit", analysisChannel: "local", name: "rabbit.png", kind: "image", canonicalName: "Rabbit", role: "character", referenceUse: "subject", sourceOf: "explicit anatomy", note: "local note", dataUrls: [] }] }) }));
+    const response = await POST(new Request("http://localhost/api/provider", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "analyze", settings: { ...settings, provider: "local", baseUrl: "http://127.0.0.1:8080", visionModel: "local-vision" }, references: [{ assetId: "rabbit", analysisChannel: "local", name: "rabbit.png", kind: "image", canonicalName: "Rabbit", declaredIdentity: "transgender woman; she/her", role: "character", referenceUse: "subject", sourceOf: "explicit anatomy", note: "local note", dataUrls: ["data:image/jpeg;base64,AA=="] }] }) }));
     assert.equal(response.status, 200);
-    assert.match(observed.messages[0].content[0].text, /Analysis channel: local/);
-    assert.match(observed.messages[0].content[0].text, /do not euphemize, moralize, or omit/i);
-    assert.equal((await response.json()).analyses[0].channel, "local");
+    assert.match(observed.messages[0].content[0].text, /Do not write a general caption/);
+    assert.match(observed.messages[0].content[0].text, /location, appearance, and qualities/i);
+    const analysis = (await response.json()).analyses[0];
+    assert.equal(analysis.channel, "local");
+    assert.equal(analysis.dirtyFocus.declaredIdentity, "transgender woman; she/her");
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -71,33 +73,55 @@ test("local video analysis sends sampled frames to JoyCaption one at a time and 
     observed.push(body);
     const frame = observed.length;
     return Response.json({ choices: [{ message: { content: JSON.stringify({
-      summary: `frame ${frame} evidence`,
-      subjects: [`Rabbit pose ${frame}`],
-      setting: `setting ${frame}`,
-      style: `style ${frame}`,
-      composition: `composition ${frame}`,
-      motion: `pose state ${frame}`,
-      continuityLocks: ["identity", `state ${frame}`],
-      usableAs: ["character"],
+      visibleBody: `frame ${frame} body evidence`, presentation: `presentation ${frame}`, clothingAndExposure: `clothing ${frame}`,
+      contactAndSexualState: `state ${frame}`, fluidsAndObjects: `objects ${frame}`, uncertainties: [], focusFindings: [],
     }) } }] });
   };
   try {
     const response = await POST(new Request("http://localhost/api/provider", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
       action: "analyze",
       settings: { ...settings, provider: "local", baseUrl: "http://127.0.0.1:8080", visionModel: "joycaption" },
-      references: [{ assetId: "rabbit-video", analysisChannel: "local", name: "rabbit.mov", kind: "video", canonicalName: "Rabbit", role: "character", referenceUse: "subject", sourceOf: "performance", note: "", dataUrls: ["data:image/jpeg;base64,AA==", "data:image/jpeg;base64,BB==", "data:image/jpeg;base64,CC=="] }],
+      references: [{ assetId: "rabbit-video", analysisChannel: "local", name: "rabbit.mov", kind: "video", canonicalName: "Rabbit", declaredIdentity: "transgender woman", role: "character", referenceUse: "subject", sourceOf: "performance", note: "", dataUrls: ["data:image/jpeg;base64,AA==", "data:image/jpeg;base64,BB==", "data:image/jpeg;base64,CC=="] }],
     }) }));
     assert.equal(response.status, 200);
     assert.equal(observed.length, 3);
     assert.deepEqual(observed.map((requestBody) => requestBody.messages[0].content.filter((part) => part.type === "image_url").length), [1, 1, 1]);
-    assert.deepEqual(observed.map((requestBody) => requestBody.max_tokens), [4096, 4096, 4096]);
-    assert.match(observed[0].messages[0].content[0].text, /sampled frame 1 of 3/i);
-    assert.match(observed[2].messages[0].content[0].text, /sampled frame 3 of 3/i);
+    assert.deepEqual(observed.map((requestBody) => requestBody.max_tokens), [2048, 2048, 2048]);
+    assert.match(observed[0].messages[0].content[0].text, /frame:\s*1 of 3/i);
+    assert.match(observed[2].messages[0].content[0].text, /frame:\s*3 of 3/i);
     const analysis = (await response.json()).analyses[0];
     assert.equal(analysis.channel, "local");
-    assert.match(analysis.summary, /Frame 1: frame 1 evidence/);
-    assert.match(analysis.summary, /Frame 3: frame 3 evidence/);
-    assert.deepEqual(analysis.continuityLocks, ["identity", "state 1", "state 2", "state 3"]);
+    assert.match(analysis.summary, /Frame 1: frame 1 body evidence/);
+    assert.match(analysis.summary, /Frame 3: frame 3 body evidence/);
+    assert.equal(analysis.dirtyFocus.frames.length, 3);
+    assert.match(analysis.continuityLocks[0], /Authored identity: transgender woman/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("local dirty focus probes each unresolved term with one-image JoyCaption requests", async () => {
+  const originalFetch = globalThis.fetch;
+  const observed = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    observed.push(body);
+    const content = observed.length === 1
+      ? { visibleBody: "visible subject", presentation: "presentation", clothingAndExposure: "clothed", contactAndSexualState: "none", fluidsAndObjects: "none", uncertainties: [], focusFindings: [{ term: "red ribbon", status: "present", location: "neck", appearance: "red", qualities: "silk" }] }
+      : { status: "unclear", location: "unknown", appearance: "occluded", qualities: "not visible" };
+    return Response.json({ choices: [{ message: { content: JSON.stringify(content) } }] });
+  };
+  try {
+    const response = await POST(new Request("http://localhost/api/provider", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+      action: "analyze",
+      settings: { ...settings, provider: "local", baseUrl: "http://127.0.0.1:8080", visionModel: "joycaption" },
+      references: [{ assetId: "rabbit", analysisChannel: "local", name: "rabbit.png", kind: "image", canonicalName: "Rabbit", declaredIdentity: "transgender woman", role: "character", referenceUse: "subject", sourceOf: "body details", note: "", focusTerms: ["red ribbon", "silver ring"], dataUrls: ["data:image/jpeg;base64,AA=="] }],
+    }) }));
+    assert.equal(response.status, 200);
+    assert.equal(observed.length, 2);
+    assert.match(observed[0].messages[0].content[0].text, /"red ribbon","silver ring"/);
+    assert.match(observed[1].messages[0].content[0].text, /Target term: silver ring/);
+    assert.deepEqual(observed.map((body) => body.messages[0].content.filter((part) => part.type === "image_url").length), [1, 1]);
+    const analysis = (await response.json()).analyses[0];
+    assert.deepEqual(analysis.dirtyFocus.termChecks.map(({ term, status }) => ({ term, status })), [{ term: "red ribbon", status: "present" }, { term: "silver ring", status: "unclear" }]);
   } finally { globalThis.fetch = originalFetch; }
 });
 

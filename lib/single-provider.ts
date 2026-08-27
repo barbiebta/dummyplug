@@ -1,14 +1,15 @@
 import { enforceNonDiegeticMusicNA, validateSingleShotPrompt } from "./single-h3.ts";
-import { buildSingleShotPrompt, buildVisionPrompt, CONNECTION_PROBE_PROMPT, selectVisionAnalysisRole, visionTemplateId, type PromptTemplateMap } from "./single-prompts.ts";
-import type { AssetAnalysis, AttachmentSpec, ModelSettings, PreparedReference, SubjectSpec } from "./types.ts";
+import { validateCharacterPolicy } from "./character-policy.ts";
+import { buildLocalDirtyProbePrompt, buildLocalDirtyScanPrompt, buildSingleShotPrompt, buildVisionPrompt, CONNECTION_PROBE_PROMPT, selectVisionAnalysisRole, visionTemplateId, type PromptTemplateMap } from "./single-prompts.ts";
+import type { AssetAnalysis, AttachmentSpec, CharacterPromptPolicy, DirtyFocusFrameFinding, DirtyFocusStatus, ModelSettings, PreparedReference, SubjectSpec } from "./types.ts";
 
 export const runtime = "edge";
 
-type AssetCatalogItem = { id: string; name: string; kind: string; canonicalName: string; role: string; referenceUse: string; sourceOf: string; note: string; localSourceOf?: string; localNote?: string };
+type AssetCatalogItem = { id: string; name: string; kind: string; canonicalName: string; declaredIdentity?: string; resolvedDeclaredIdentity?: string; role: string; referenceUse: string; sourceOf: string; note: string; localSourceOf?: string; localNote?: string };
 type ProviderRequest =
   | { action: "test"; settings: ModelSettings; promptTemplates?: Partial<PromptTemplateMap> }
   | { action: "analyze"; settings: ModelSettings; references: PreparedReference[]; promptTemplates?: Partial<PromptTemplateMap> }
-  | { action: "expand-single"; settings: ModelSettings; simplePrompt: string; durationSeconds: number; assets: AssetCatalogItem[]; analyses: AssetAnalysis[]; attachments: AttachmentSpec[]; subjects: SubjectSpec[]; taskTypes: string[]; requireNonDiegeticMusicNA?: boolean; promptTemplates?: Partial<PromptTemplateMap> };
+  | { action: "expand-single"; settings: ModelSettings; simplePrompt: string; durationSeconds: number; assets: AssetCatalogItem[]; analyses: AssetAnalysis[]; attachments: AttachmentSpec[]; subjects: SubjectSpec[]; taskTypes: string[]; characterPolicy: CharacterPromptPolicy; requireNonDiegeticMusicNA?: boolean; promptTemplates?: Partial<PromptTemplateMap> };
 
 function endpointFor(settings: ModelSettings) {
   if (settings.provider === "openrouter") return "https://openrouter.ai/api/v1/chat/completions";
@@ -47,8 +48,26 @@ function parseJson<T>(text: string): T {
   const unfenced = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   try { return JSON.parse(unfenced) as T; } catch {
     const start = unfenced.indexOf("{");
-    const end = unfenced.lastIndexOf("}");
-    if (start >= 0 && end > start) return JSON.parse(unfenced.slice(start, end + 1)) as T;
+    if (start >= 0) {
+      let depth = 0;
+      let quoted = false;
+      let escaped = false;
+      for (let index = start; index < unfenced.length; index += 1) {
+        const character = unfenced[index];
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === '"') quoted = false;
+          continue;
+        }
+        if (character === '"') quoted = true;
+        else if (character === "{") depth += 1;
+        else if (character === "}") {
+          depth -= 1;
+          if (depth === 0) return JSON.parse(unfenced.slice(start, index + 1)) as T;
+        }
+      }
+    }
     throw new Error("The model response did not contain valid JSON.");
   }
 }
@@ -142,6 +161,83 @@ function mergeSampleAnalyses(samples: AssetAnalysis[], reference: PreparedRefere
   };
 }
 
+type DirtyScanReturn = {
+  visibleBody?: unknown;
+  presentation?: unknown;
+  clothingAndExposure?: unknown;
+  contactAndSexualState?: unknown;
+  fluidsAndObjects?: unknown;
+  uncertainties?: unknown;
+  focusFindings?: unknown;
+};
+
+function normalizeDirtyStatus(value: unknown): DirtyFocusStatus {
+  const status = String(value || "").toLocaleLowerCase();
+  return status === "present" || status === "absent" ? status : "unclear";
+}
+
+async function analyzeLocalDirty(reference: PreparedReference, settings: ModelSettings, templates: Partial<PromptTemplateMap> | undefined, signal: AbortSignal) {
+  const focusTerms = [...new Set((reference.focusTerms || []).map((term) => term.trim()).filter(Boolean))];
+  const frames: DirtyFocusFrameFinding[] = [];
+  const rawRecords: unknown[] = [];
+  for (let index = 0; index < reference.dataUrls.length; index += 1) {
+    const dataUrl = reference.dataUrls[index];
+    const scanPrompt = buildLocalDirtyScanPrompt(reference, index + 1, reference.dataUrls.length, templates?.["vision-local-dirty"]?.trim() || undefined);
+    const scanRaw = await chat(settings, settings.visionModel, [{ role: "user", content: [{ type: "text", text: scanPrompt }, { type: "image_url", image_url: { url: dataUrl } }] }], {
+      jsonMode: true, timeoutMs: 360_000, maxTokens: 2_048, operation: `Local dirty scan for ${reference.name} frame ${index + 1}/${reference.dataUrls.length}`, signal,
+    });
+    const scan = parseJson<DirtyScanReturn>(scanRaw);
+    const focusFindings = Array.isArray(scan.focusFindings) ? scan.focusFindings.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object") : [];
+    const termChecks: DirtyFocusFrameFinding["termChecks"] = [];
+    for (const term of focusTerms) {
+      const finding = focusFindings.find((item) => String(item.term || "").trim().toLocaleLowerCase() === term.toLocaleLowerCase());
+      if (finding && normalizeDirtyStatus(finding.status) !== "unclear") {
+        termChecks.push({ term, status: normalizeDirtyStatus(finding.status), evidence: `Location: ${String(finding.location || "unknown")}. Appearance: ${String(finding.appearance || "unknown")}. Qualities: ${String(finding.qualities || "unknown")}.` });
+        continue;
+      }
+      const probePrompt = buildLocalDirtyProbePrompt(reference, term, index + 1, reference.dataUrls.length, templates?.["vision-local-probe"]?.trim() || undefined);
+      const probeRaw = await chat(settings, settings.visionModel, [{ role: "user", content: [{ type: "text", text: probePrompt }, { type: "image_url", image_url: { url: dataUrl } }] }], {
+        jsonMode: true, timeoutMs: 180_000, maxTokens: 384, operation: `Local dirty probe for ${reference.name} frame ${index + 1}/${reference.dataUrls.length}`, signal,
+      });
+      const probe = parseJson<{ status?: unknown; location?: unknown; appearance?: unknown; qualities?: unknown }>(probeRaw);
+      termChecks.push({ term, status: normalizeDirtyStatus(probe.status), evidence: `Location: ${String(probe.location || "unknown")}. Appearance: ${String(probe.appearance || "unknown")}. Qualities: ${String(probe.qualities || "unknown")}.` });
+      rawRecords.push({ frame: index + 1, term, probe: probeRaw });
+    }
+    frames.push({
+      frame: index + 1,
+      visibleBody: String(scan.visibleBody || "Not confidently identified."),
+      presentation: String(scan.presentation || "Not confidently identified."),
+      clothingAndExposure: String(scan.clothingAndExposure || "Not confidently identified."),
+      contactAndSexualState: String(scan.contactAndSexualState || "Not confidently identified."),
+      fluidsAndObjects: String(scan.fluidsAndObjects || "Not confidently identified."),
+      uncertainties: strings(scan.uncertainties),
+      termChecks,
+    });
+    rawRecords.push({ frame: index + 1, scan: scanRaw });
+  }
+  const termChecks = focusTerms.map((term) => {
+    const checks = frames.flatMap((frame) => frame.termChecks).filter((check) => check.term.toLocaleLowerCase() === term.toLocaleLowerCase());
+    const status: DirtyFocusStatus = checks.some((check) => check.status === "present") ? "present" : checks.length && checks.every((check) => check.status === "absent") ? "absent" : "unclear";
+    return { term, status, evidence: checks.map((check) => `Frame ${frames.find((frame) => frame.termChecks.includes(check))?.frame || "?"}: ${check.evidence}`).join(" ") };
+  });
+  const frameText = frames.map((frame) => `Frame ${frame.frame}: ${frame.visibleBody} ${frame.presentation} ${frame.clothingAndExposure} ${frame.contactAndSexualState} ${frame.fluidsAndObjects}`).join("\n");
+  return {
+    assetId: reference.assetId,
+    channel: "local" as const,
+    analysisRole: selectVisionAnalysisRole(reference),
+    summary: `${reference.declaredIdentity ? `Declared identity (authored, not inferred): ${reference.declaredIdentity}. ` : ""}${frameText}`,
+    subjects: frames.map((frame) => `Frame ${frame.frame}: ${frame.visibleBody}; ${frame.presentation}; ${frame.clothingAndExposure}; ${frame.contactAndSexualState}; ${frame.fluidsAndObjects}`),
+    setting: "Not part of the narrow local dirty-focus scan.",
+    style: "Not part of the narrow local dirty-focus scan.",
+    composition: "Not part of the narrow local dirty-focus scan.",
+    motion: frames.length > 1 ? "Compare the sampled frame states; no unsampled motion was inferred." : "No motion inferred from a still image.",
+    continuityLocks: [reference.declaredIdentity ? `Authored identity: ${reference.declaredIdentity}.` : "No authored identity supplied.", ...termChecks.filter((check) => check.status === "present").map((check) => `${check.term}: ${check.evidence}`)],
+    usableAs: ["dirty focus", ...termChecks.filter((check) => check.status === "present").map((check) => check.term)],
+    dirtyFocus: { declaredIdentity: reference.declaredIdentity || "", frames, termChecks },
+    raw: JSON.stringify(rawRecords, null, 2),
+  } satisfies AssetAnalysis;
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json() as ProviderRequest;
@@ -159,10 +255,14 @@ export async function POST(request: Request) {
       if (!body.references?.length) return Response.json({ error: "No assets supplied." }, { status: 400 });
       const analyses: AssetAnalysis[] = [];
       for (const reference of body.references) {
+        if (body.settings.provider === "local") {
+          analyses.push(await analyzeLocalDirty(reference, body.settings, body.promptTemplates, request.signal));
+          continue;
+        }
         const role = selectVisionAnalysisRole(reference);
         const prompt = buildVisionPrompt(reference, body.promptTemplates?.[visionTemplateId(role)]?.trim() || undefined);
-        const splitLocalFrames = body.settings.provider === "local" && reference.dataUrls.length > 1;
-        const batches = splitLocalFrames ? reference.dataUrls.map((url) => [url]) : [reference.dataUrls];
+        const splitLocalFrames = false;
+        const batches = [reference.dataUrls];
         const samples: AssetAnalysis[] = [];
         for (let index = 0; index < batches.length; index += 1) {
           const framePrompt = splitLocalFrames
@@ -170,7 +270,7 @@ export async function POST(request: Request) {
             : prompt;
           const content: Array<Record<string, unknown>> = [{ type: "text", text: framePrompt }];
           for (const url of batches[index]) content.push({ type: "image_url", image_url: { url } });
-          const raw = await chat(body.settings, body.settings.visionModel, [{ role: "user", content }], { jsonMode: true, timeoutMs: 360_000, maxTokens: body.settings.provider === "local" ? 4_096 : 8_192, operation: `Vision analysis for ${reference.name}${splitLocalFrames ? ` frame ${index + 1}/${batches.length}` : ""}`, signal: request.signal });
+          const raw = await chat(body.settings, body.settings.visionModel, [{ role: "user", content }], { jsonMode: true, timeoutMs: 360_000, maxTokens: 8_192, operation: `Vision analysis for ${reference.name}`, signal: request.signal });
           samples.push(normalizeAnalysis({ ...parseJson<Partial<AssetAnalysis>>(raw), raw }, reference));
         }
         analyses.push(mergeSampleAnalyses(samples, reference));
@@ -181,7 +281,7 @@ export async function POST(request: Request) {
     if (body.action === "expand-single") {
       if (!body.simplePrompt?.trim()) return Response.json({ error: "Write a simple prompt first." }, { status: 400 });
       if (!body.attachments?.length) return Response.json({ error: "Select at least one asset." }, { status: 400 });
-      const prompt = buildSingleShotPrompt(body.simplePrompt, body.durationSeconds, body.assets, body.analyses || [], body.attachments, body.subjects || [], body.taskTypes || [], body.promptTemplates?.["single-shot"]?.trim() || undefined);
+      const prompt = buildSingleShotPrompt(body.simplePrompt, body.durationSeconds, body.assets, body.analyses || [], body.attachments, body.subjects || [], body.taskTypes || [], body.promptTemplates?.["single-shot"]?.trim() || undefined, body.characterPolicy);
       const modelReturn = (await chat(body.settings, body.settings.promptModel, [{ role: "user", content: prompt }], {
         timeoutMs: 600_000,
         maxTokens: Math.max(8_192, Math.min(32_768, Number(body.settings.promptMaxTokens) || 16_384)),
@@ -191,7 +291,8 @@ export async function POST(request: Request) {
       const replaced = replaceFilenameReferences(modelReturn, body.attachments);
       const raw = body.requireNonDiegeticMusicNA ? enforceNonDiegeticMusicNA(replaced) : replaced;
       const validation = validateSingleShotPrompt(raw, body.attachments, body.subjects || []);
-      if (!validation.valid) return Response.json({ error: `The prompt model violated the single-shot H3 format: ${JSON.stringify(validation)}`, raw, retained: true }, { status: 422 });
+      const characterValidation = validateCharacterPolicy(raw, body.subjects || [], body.characterPolicy);
+      if (!validation.valid || !characterValidation.valid) return Response.json({ error: `The prompt model violated the single-shot H3 format or character policy: ${JSON.stringify({ ...validation, characterPolicy: characterValidation })}`, raw, retained: true }, { status: 422 });
       return Response.json({ prompt: raw, raw });
     }
 

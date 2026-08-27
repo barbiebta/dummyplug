@@ -66,7 +66,22 @@ function ProjectPicker({ projects, activeProjectId, onSelect, onCreate, legacyAs
 }
 
 function OutputSettings({ settings, onChange }: { settings: ProjectOutputSettings; onChange(patch: Partial<ProjectOutputSettings>): void }) {
+  const setCastLock = (allCharactersTransgenderWomen: boolean) => onChange({ characterPolicy: { ...settings.characterPolicy, allCharactersTransgenderWomen } });
+  const setVocabulary = (group: keyof ProjectOutputSettings["characterPolicy"]["allowedVocabulary"], allowed: boolean) => onChange({
+    characterPolicy: { ...settings.characterPolicy, allowedVocabulary: { ...settings.characterPolicy.allowedVocabulary, [group]: allowed } },
+  });
   return <div className="project-output-settings">
+    <section className="cast-policy-settings">
+      <div><span>cast lock</span><small>authored identity policy for this project</small></div>
+      <label className="cast-lock-toggle"><input type="checkbox" checked={settings.characterPolicy.allCharactersTransgenderWomen} onChange={(event) => setCastLock(event.target.checked)} /><span>all character subjects are transgender women</span></label>
+      <fieldset><legend>allowed final-prompt vocabulary · checked = allowed</legend>{([
+        ["man", "man / men / male"],
+        ["woman", "woman / women / female"],
+        ["trans", "trans / transgender"],
+        ["futa", "futa / futanari"],
+      ] as const).map(([group, label]) => <label key={group}><input type="checkbox" checked={settings.characterPolicy.allowedVocabulary[group]} onChange={(event) => setVocabulary(group, event.target.checked)} /><span>{label}</span></label>)}</fieldset>
+      <p>Per-asset declared identity overrides cast lock. Unchecked words invalidate generation and block sealing; Dummyplug never silently deletes them.</p>
+    </section>
     <div className="project-settings-head"><span>project output settings</span><div><button onClick={() => onChange({ width: 768, height: 1344 })}>portrait</button><button onClick={() => onChange({ width: 1344, height: 768 })}>landscape</button><button onClick={() => onChange({ width: 1024, height: 1024 })}>square</button></div></div>
     <div className="job-control-grid project-control-grid">
       <label><span>width</span><input type="number" min={64} max={8192} value={settings.width} onChange={(event) => onChange({ width: Number(event.target.value) })} /></label>

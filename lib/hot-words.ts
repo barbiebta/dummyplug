@@ -27,6 +27,7 @@ function missingTerms(terms: string[], source: string, output: string) {
 function assetMetadataText(asset: AssetRecord) {
   return [
     asset.canonicalName,
+    asset.declaredIdentity,
     asset.role,
     asset.referenceUse,
     asset.sourceOf,

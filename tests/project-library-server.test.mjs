@@ -15,6 +15,7 @@ test("creates, lists, and persists a project and its settings", async () => with
   const project = await library.createProject("rabbit apartment");
   assert.match(project.id, /^[0-9a-f-]{36}$/i);
   assert.equal(project.outputSettings.outputContainer, "mp4");
+  assert.equal(project.outputSettings.characterPolicy.allCharactersTransgenderWomen, true);
   assert.equal((await library.listProjects())[0].name, "rabbit apartment");
   const changed = await library.updateProject(project.id, { outputSettings: { width: 1024, height: 576 } });
   assert.equal(changed.outputSettings.width, 1024);
@@ -72,13 +73,14 @@ test("manual and vision metadata updates rewrite the v4 companion without changi
   const project = await library.createProject("metadata test");
   const imported = await library.importAsset(project.id, { relativePath: "rabbit.png", bytes: Buffer.from("rabbit") });
   const updated = await library.updateAssetMetadata(project.id, imported.relativePath, {
-    metadata: { canonicalName: "Rabbit", role: "character", note: "drunk and happy", localSourceOf: "explicit anatomy", localNote: "local-only instruction" },
+    metadata: { canonicalName: "Rabbit", declaredIdentity: "transgender woman; she/her", role: "character", note: "drunk and happy", localSourceOf: "explicit anatomy", localNote: "local-only instruction" },
     analysis: { assetId: imported.id, summary: "A very specific rabbit." },
     localAnalysis: { assetId: imported.id, summary: "A direct local description." },
     sourceFacts: { width: 768, height: 1344 },
   });
   assert.equal(updated.id, imported.id);
   assert.equal(updated.canonicalName, "Rabbit");
+  assert.equal(updated.declaredIdentity, "transgender woman; she/her");
   assert.equal(updated.analysis?.summary, "A very specific rabbit.");
   assert.equal(updated.localAnalysis?.summary, "A direct local description.");
   assert.equal(updated.localSourceOf, "explicit anatomy");

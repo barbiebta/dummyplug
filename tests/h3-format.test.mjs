@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compileAttachments, validateSingleShotPrompt } from "../lib/single-h3.ts";
 import { replaceFilenameReferences } from "../lib/single-provider.ts";
+import { validateCharacterPolicy } from "../lib/character-policy.ts";
 
 const base = { size: 1, previewUrl: "blob:test", selected: true, note: "", analysis: undefined, missingFile: false };
 const assets = [
@@ -84,4 +85,16 @@ test("derives official task types from explicit H3 uses", () => {
   assert.deepEqual(compiled.taskTypes, ["keyframe completion", "audio reference"]);
   assert.equal(compiled.attachments[0].standaloneEntry, true);
   assert.equal(compiled.attachments[1].standaloneEntry, true);
+});
+
+test("character policy uses whole-word vocabulary checks and enforces cast lock per character Subject", () => {
+  const policy = { allCharactersTransgenderWomen: true, allowedVocabulary: { man: false, woman: true, trans: true, futa: false } };
+  const subjects = [{ label: "<Subject 1>", canonicalName: "Rabbit", role: "character", assetIds: ["rabbit"], attachmentLabels: ["<Picture 1>"] }];
+  const prompt = "subject_definitions:\n<Subject 1>: Rabbit is a transgender woman.\nsummary:\nA woman walks.\nretention_analysis:\nnone\ndetailed_description:\n[Shot 1]\noverall_soundscape:\nnone\nnon_diegetic_music:\nN/A";
+  assert.equal(validateCharacterPolicy(prompt, subjects, policy).valid, true);
+  const forbidden = validateCharacterPolicy(prompt.replace("A woman walks.", "A man walks."), subjects, policy);
+  assert.deepEqual(forbidden.forbiddenVocabulary.map((item) => item.group), ["man"]);
+  assert.equal(validateCharacterPolicy(prompt.replace("transgender ", ""), subjects, policy).missingCastIdentity[0], "<Subject 1>");
+  assert.equal(validateCharacterPolicy(prompt, subjects, { ...policy, allowedVocabulary: { ...policy.allowedVocabulary, trans: false } }).valid, false);
+  assert.equal(validateCharacterPolicy(prompt.replace("transgender woman", "person").replace("A woman", "A person"), subjects, { ...policy, allowedVocabulary: { ...policy.allowedVocabulary, trans: false } }).valid, true);
 });

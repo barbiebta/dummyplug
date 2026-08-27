@@ -30,6 +30,7 @@ export function compileAttachments(assets: AssetRecord[]): Omit<SingleShotPrompt
       label: `<Subject ${subjects.length + 1}>`,
       canonicalName: members[0].asset.canonicalName.trim() || members[0].asset.name,
       role,
+      ...(members.map(({ asset }) => asset.declaredIdentity?.trim() || "").find(Boolean) ? { declaredIdentity: members.map(({ asset }) => asset.declaredIdentity?.trim() || "").find(Boolean) } : {}),
       assetIds: members.map(({ asset }) => asset.id),
       attachmentLabels: members.map(({ attachment }) => attachment.label),
     });

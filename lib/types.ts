@@ -32,6 +32,20 @@ export interface ProviderProfiles {
   local: ModelSettings;
 }
 
+export interface CharacterVocabularyAllowance {
+  man: boolean;
+  woman: boolean;
+  trans: boolean;
+  futa: boolean;
+}
+
+export interface CharacterPromptPolicy {
+  /** Authored project fact applied to character assets without an explicit override. */
+  allCharactersTransgenderWomen: boolean;
+  /** Checked vocabulary families are allowed to appear in the final H3 prompt. */
+  allowedVocabulary: CharacterVocabularyAllowance;
+}
+
 export interface AssetRecord {
   id: string;
   name: string;
@@ -52,6 +66,8 @@ export interface AssetRecord {
   previewUrl: string;
   selected: boolean;
   canonicalName: string;
+  /** Manual identity authority. Never inferred or revised by vision analysis. */
+  declaredIdentity: string;
   role: AssetRole;
   referenceUse: ReferenceUse;
   sourceOf: string;
@@ -82,6 +98,26 @@ export interface JobSettings {
   audioCodec: string;
   audioBitrate: string;
   workflowPreset: "dasiwa-ref2va:v1";
+  characterPolicy: CharacterPromptPolicy;
+}
+
+export type DirtyFocusStatus = "present" | "absent" | "unclear";
+export interface DirtyFocusTermCheck { term: string; status: DirtyFocusStatus; evidence: string }
+export interface DirtyFocusFrameFinding {
+  frame: number;
+  visibleBody: string;
+  presentation: string;
+  clothingAndExposure: string;
+  contactAndSexualState: string;
+  fluidsAndObjects: string;
+  uncertainties: string[];
+  termChecks: DirtyFocusTermCheck[];
+}
+export interface DirtyFocusAnalysis {
+  /** Copied manual/project authority; this value is not a model inference. */
+  declaredIdentity: string;
+  frames: DirtyFocusFrameFinding[];
+  termChecks: DirtyFocusTermCheck[];
 }
 
 export interface AssetAnalysis {
@@ -97,6 +133,7 @@ export interface AssetAnalysis {
   motion: string;
   continuityLocks: string[];
   usableAs: string[];
+  dirtyFocus?: DirtyFocusAnalysis;
   raw?: string;
 }
 
@@ -108,6 +145,7 @@ export interface PreparedReference {
   name: string;
   kind: AssetKind;
   canonicalName: string;
+  declaredIdentity: string;
   role: AssetRole;
   referenceUse: ReferenceUse;
   sourceOf: string;
@@ -128,6 +166,8 @@ export interface SubjectSpec {
   label: string;
   canonicalName: string;
   role: AssetRole;
+  /** Explicit per-asset identity override, when one exists. */
+  declaredIdentity?: string;
   assetIds: string[];
   attachmentLabels: string[];
 }

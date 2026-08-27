@@ -69,6 +69,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function cleanOutputSettings(value: unknown): ProjectOutputSettings {
   const raw = isRecord(value) ? value : {};
   const fromRaw = <T extends keyof ProjectOutputSettings>(key: T) => raw[key] ?? DEFAULT_PROJECT_OUTPUT_SETTINGS[key];
+  const rawPolicy = isRecord(raw.characterPolicy) ? raw.characterPolicy : {};
+  const rawVocabulary = isRecord(rawPolicy.allowedVocabulary) ? rawPolicy.allowedVocabulary : {};
   return {
     defaultsVersion: DEFAULT_PROJECT_OUTPUT_SETTINGS.defaultsVersion,
     width: Number(fromRaw("width")), height: Number(fromRaw("height")), fps: Number(fromRaw("fps")), steps: Number(fromRaw("steps")),
@@ -78,6 +80,17 @@ function cleanOutputSettings(value: unknown): ProjectOutputSettings {
     refImageSize: fromRaw("refImageSize") === "match" ? "match" : "max",
     inputScaling: String(fromRaw("inputScaling")) as ProjectOutputSettings["inputScaling"],
     workflowPreset: "dasiwa-ref2va:v1",
+    characterPolicy: {
+      allCharactersTransgenderWomen: rawPolicy.allCharactersTransgenderWomen == null
+        ? DEFAULT_PROJECT_OUTPUT_SETTINGS.characterPolicy.allCharactersTransgenderWomen
+        : rawPolicy.allCharactersTransgenderWomen === true,
+      allowedVocabulary: {
+        man: rawVocabulary.man == null ? DEFAULT_PROJECT_OUTPUT_SETTINGS.characterPolicy.allowedVocabulary.man : rawVocabulary.man === true,
+        woman: rawVocabulary.woman == null ? DEFAULT_PROJECT_OUTPUT_SETTINGS.characterPolicy.allowedVocabulary.woman : rawVocabulary.woman === true,
+        trans: rawVocabulary.trans == null ? DEFAULT_PROJECT_OUTPUT_SETTINGS.characterPolicy.allowedVocabulary.trans : rawVocabulary.trans === true,
+        futa: rawVocabulary.futa == null ? DEFAULT_PROJECT_OUTPUT_SETTINGS.characterPolicy.allowedVocabulary.futa : rawVocabulary.futa === true,
+      },
+    },
   };
 }
 
@@ -336,6 +349,7 @@ export class ProjectLibrary {
     const metadata: ProjectAssetMetadata = {
       ...rawMetadata,
       canonicalName: typeof rawMetadata.canonicalName === "string" ? rawMetadata.canonicalName : "",
+      declaredIdentity: typeof rawMetadata.declaredIdentity === "string" ? rawMetadata.declaredIdentity : "",
       role: VALID_ROLES.has(String(rawMetadata.role)) ? String(rawMetadata.role) as ProjectAssetMetadata["role"] : "general",
       referenceUse: VALID_REFERENCE_USES.has(String(rawMetadata.referenceUse)) ? String(rawMetadata.referenceUse) as ProjectAssetMetadata["referenceUse"] : "subject",
       sourceOf: typeof rawMetadata.sourceOf === "string" ? rawMetadata.sourceOf : "",
@@ -355,7 +369,7 @@ export class ProjectLibrary {
       ...(typeof source.height === "number" ? { sourceHeight: source.height } : {}),
       ...(typeof source.duration === "number" ? { sourceDuration: source.duration } : {}),
       ...(typeof source.sha256 === "string" ? { sha256: source.sha256 } : {}),
-      canonicalName: metadata.canonicalName, role: metadata.role, referenceUse: metadata.referenceUse, sourceOf: metadata.sourceOf, note: metadata.note,
+      canonicalName: metadata.canonicalName, declaredIdentity: metadata.declaredIdentity, role: metadata.role, referenceUse: metadata.referenceUse, sourceOf: metadata.sourceOf, note: metadata.note,
       localSourceOf: metadata.localSourceOf, localNote: metadata.localNote,
       metadata,
       analysis: isRecord(sidecar.analysis) ? sidecar.analysis : undefined,

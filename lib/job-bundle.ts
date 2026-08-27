@@ -1,5 +1,6 @@
 import JSZip from "jszip";
 import { compileAttachments, hasNonDiegeticMusicNA, validateSingleShotPrompt } from "./single-h3.ts";
+import { validateCharacterPolicy } from "./character-policy.ts";
 import { DIRECTOR_INPUT_SCALING_OPTIONS } from "./types.ts";
 import type { AssetRecord, JobSettings, SubjectSpec } from "./types.ts";
 
@@ -25,7 +26,7 @@ export interface SealJobInput {
 }
 
 export const DEFAULT_JOB_SETTINGS: JobSettings = {
-  defaultsVersion: 2,
+  defaultsVersion: 3,
   title: "",
   width: 768,
   height: 1344,
@@ -43,6 +44,10 @@ export const DEFAULT_JOB_SETTINGS: JobSettings = {
   audioCodec: "aac",
   audioBitrate: "192k",
   workflowPreset: "dasiwa-ref2va:v1",
+  characterPolicy: {
+    allCharactersTransgenderWomen: true,
+    allowedVocabulary: { man: false, woman: true, trans: true, futa: true },
+  },
 };
 
 const DIRECTOR_INPUT_SCALING_VALUES = new Set<string>(DIRECTOR_INPUT_SCALING_OPTIONS.map((option) => option.value));
@@ -76,7 +81,18 @@ export function normalizeJobSettings(saved?: unknown): JobSettings {
     if (raw.outputContainer == null || ["Auto", "webm"].includes(outputContainer)) outputContainer = DEFAULT_JOB_SETTINGS.outputContainer;
     if (raw.audioCodec == null || ["Auto", "opus"].includes(audioCodec)) audioCodec = DEFAULT_JOB_SETTINGS.audioCodec;
   }
-  return { ...DEFAULT_JOB_SETTINGS, ...raw, defaultsVersion: DEFAULT_JOB_SETTINGS.defaultsVersion, refImageSize, inputScaling, outputContainer, audioCodec } as JobSettings;
+  const rawPolicy = raw.characterPolicy && typeof raw.characterPolicy === "object" ? raw.characterPolicy as Record<string, unknown> : {};
+  const rawVocabulary = rawPolicy.allowedVocabulary && typeof rawPolicy.allowedVocabulary === "object" ? rawPolicy.allowedVocabulary as Record<string, unknown> : {};
+  const characterPolicy = {
+    allCharactersTransgenderWomen: rawPolicy.allCharactersTransgenderWomen == null ? DEFAULT_JOB_SETTINGS.characterPolicy.allCharactersTransgenderWomen : rawPolicy.allCharactersTransgenderWomen === true,
+    allowedVocabulary: {
+      man: rawVocabulary.man == null ? DEFAULT_JOB_SETTINGS.characterPolicy.allowedVocabulary.man : rawVocabulary.man === true,
+      woman: rawVocabulary.woman == null ? DEFAULT_JOB_SETTINGS.characterPolicy.allowedVocabulary.woman : rawVocabulary.woman === true,
+      trans: rawVocabulary.trans == null ? DEFAULT_JOB_SETTINGS.characterPolicy.allowedVocabulary.trans : rawVocabulary.trans === true,
+      futa: rawVocabulary.futa == null ? DEFAULT_JOB_SETTINGS.characterPolicy.allowedVocabulary.futa : rawVocabulary.futa === true,
+    },
+  };
+  return { ...DEFAULT_JOB_SETTINGS, ...raw, defaultsVersion: DEFAULT_JOB_SETTINGS.defaultsVersion, refImageSize, inputScaling, outputContainer, audioCodec, characterPolicy } as JobSettings;
 }
 
 export function randomSeed() {
@@ -138,6 +154,11 @@ export async function sealJobZip(input: SealJobInput) {
   ];
   const promptValidation = validateSingleShotPrompt(input.prompt, compiled.attachments, input.subjects);
   if (!promptValidation.valid) errors.push("The six-section H3 prompt is not valid for the current reference snapshot.");
+  const characterValidation = validateCharacterPolicy(input.prompt, input.subjects, input.settings.characterPolicy);
+  if (!characterValidation.valid) {
+    if (characterValidation.forbiddenVocabulary.length) errors.push(`Final prompt uses disallowed character vocabulary: ${characterValidation.forbiddenVocabulary.map((item) => item.terms.join(", ")).join("; ")}.`);
+    if (characterValidation.missingCastIdentity.length) errors.push(`Cast lock identity is missing from: ${characterValidation.missingCastIdentity.join(", ")}.`);
+  }
   if (input.requireNonDiegeticMusicNA && !hasNonDiegeticMusicNA(input.prompt)) errors.push("non_diegetic_music must be N/A while the job checkbox is on.");
   for (const asset of input.assets) if (!input.files.has(asset.id)) errors.push(`${asset.name}: source file is not loaded.`);
   if (errors.length) throw new Error(errors.join(" "));
@@ -186,6 +207,7 @@ export async function sealJobZip(input: SealJobInput) {
     created_at: createdAt,
     ...(input.projectName?.trim() || input.settings.title.trim() ? { title: input.projectName?.trim() || input.settings.title.trim() } : {}),
     workflow: { template, version: Number(versionText) },
+    prompt_policy: input.settings.characterPolicy,
     generation: {
       width: input.settings.width,
       height: input.settings.height,

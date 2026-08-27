@@ -10,7 +10,7 @@ export interface ReferenceSidecarSource {
 export interface ReferenceSidecar {
   schema: typeof REFERENCE_SIDECAR_SCHEMA; assetId: string; relativePath: string; importedAt: string;
   source: ReferenceSidecarSource;
-  metadata: { canonicalName: string; role: AssetRole; referenceUse: ReferenceUse; sourceOf: string; note: string; localSourceOf: string; localNote: string };
+  metadata: { canonicalName: string; declaredIdentity: string; role: AssetRole; referenceUse: ReferenceUse; sourceOf: string; note: string; localSourceOf: string; localNote: string };
   analysis?: AssetAnalysis; localAnalysis?: AssetAnalysis; updatedAt: string;
   provider: { kind: ModelSettings["provider"]; visionModel: string };
   localProvider?: { kind: ModelSettings["provider"]; visionModel: string };
@@ -42,7 +42,7 @@ export function makeReferenceSidecar(asset: AssetRecord, settings: ModelSettings
     source: { name: asset.name, size: asset.size, mimeType: asset.mimeType,
       ...(asset.lastModified == null ? {} : { lastModified: asset.lastModified }), ...(options.sha256 || asset.sha256 ? { sha256: options.sha256 || asset.sha256 } : {}),
       ...(asset.sourceWidth == null ? {} : { width: asset.sourceWidth }), ...(asset.sourceHeight == null ? {} : { height: asset.sourceHeight }), ...(asset.sourceDuration == null ? {} : { duration: asset.sourceDuration }) },
-    metadata: { canonicalName: asset.canonicalName, role: asset.role, referenceUse: asset.referenceUse, sourceOf: asset.sourceOf, note: asset.note, localSourceOf: asset.localSourceOf || "", localNote: asset.localNote || "" },
+    metadata: { canonicalName: asset.canonicalName, declaredIdentity: asset.declaredIdentity || "", role: asset.role, referenceUse: asset.referenceUse, sourceOf: asset.sourceOf, note: asset.note, localSourceOf: asset.localSourceOf || "", localNote: asset.localNote || "" },
     analysis: asset.analysis ? { ...asset.analysis, assetId: asset.id, channel: "strong" } : undefined,
     localAnalysis: asset.localAnalysis ? { ...asset.localAnalysis, assetId: asset.id, channel: "local" } : undefined,
     updatedAt: analyzedAt,
@@ -52,7 +52,7 @@ export function makeReferenceSidecar(asset: AssetRecord, settings: ModelSettings
 }
 function strings(value: unknown) { return Array.isArray(value) ? value.map(String).filter(Boolean) : []; }
 export interface ImportedReferenceSidecar {
-  assetId?: string; relativePath?: string; importedAt?: string; analysis?: AssetAnalysis; localAnalysis?: AssetAnalysis; canonicalName?: string;
+  assetId?: string; relativePath?: string; importedAt?: string; analysis?: AssetAnalysis; localAnalysis?: AssetAnalysis; canonicalName?: string; declaredIdentity?: string;
   role?: AssetRole; referenceUse?: ReferenceUse; sourceOf?: string; note?: string; localSourceOf?: string; localNote?: string; source?: ReferenceSidecarSource;
   schema?: typeof REFERENCE_SIDECAR_SCHEMA;
 }
@@ -77,12 +77,12 @@ export function readReferenceSidecar(text: string, assetId: string): ImportedRef
       ...(so.width == null ? {} : { width: Number(so.width) }), ...(so.height == null ? {} : { height: Number(so.height) }), ...(so.duration == null ? {} : { duration: Number(so.duration) }) } : undefined;
     return { assetId: typeof parsed.assetId === "string" ? parsed.assetId : undefined, relativePath: typeof parsed.relativePath === "string" ? parsed.relativePath : undefined,
       importedAt: typeof parsed.importedAt === "string" ? parsed.importedAt : undefined, schema: REFERENCE_SIDECAR_SCHEMA,
-      canonicalName: typeof metadata.canonicalName === "string" ? metadata.canonicalName : undefined, role: validRole, referenceUse: validUse,
+      canonicalName: typeof metadata.canonicalName === "string" ? metadata.canonicalName : undefined, declaredIdentity: typeof metadata.declaredIdentity === "string" ? metadata.declaredIdentity : undefined, role: validRole, referenceUse: validUse,
       sourceOf: typeof metadata.sourceOf === "string" ? metadata.sourceOf : undefined, note: typeof metadata.note === "string" ? metadata.note : undefined,
       localSourceOf: typeof metadata.localSourceOf === "string" ? metadata.localSourceOf : undefined, localNote: typeof metadata.localNote === "string" ? metadata.localNote : undefined, source,
       analysis: hasAnalysis ? { assetId, analysisRole: ["character", "setting", "style", "general"].includes(String(candidate.analysisRole)) ? candidate.analysisRole as AssetAnalysis["analysisRole"] : undefined,
         channel: "strong", summary: String(candidate.summary || "Imported reference analysis."), subjects: strings(candidate.subjects), setting: String(candidate.setting || ""), style: String(candidate.style || ""), composition: String(candidate.composition || ""), motion: String(candidate.motion || ""), continuityLocks: strings(candidate.continuityLocks), usableAs: strings(candidate.usableAs), raw: candidate.raw == null ? undefined : String(candidate.raw) } : undefined,
       localAnalysis: hasLocalAnalysis ? { assetId, analysisRole: ["character", "setting", "style", "general"].includes(String(localCandidate.analysisRole)) ? localCandidate.analysisRole as AssetAnalysis["analysisRole"] : undefined,
-        channel: "local", summary: String(localCandidate.summary || "Imported local reference analysis."), subjects: strings(localCandidate.subjects), setting: String(localCandidate.setting || ""), style: String(localCandidate.style || ""), composition: String(localCandidate.composition || ""), motion: String(localCandidate.motion || ""), continuityLocks: strings(localCandidate.continuityLocks), usableAs: strings(localCandidate.usableAs), raw: localCandidate.raw == null ? undefined : String(localCandidate.raw) } : undefined };
+        channel: "local", summary: String(localCandidate.summary || "Imported local reference analysis."), subjects: strings(localCandidate.subjects), setting: String(localCandidate.setting || ""), style: String(localCandidate.style || ""), composition: String(localCandidate.composition || ""), motion: String(localCandidate.motion || ""), continuityLocks: strings(localCandidate.continuityLocks), usableAs: strings(localCandidate.usableAs), raw: localCandidate.raw == null ? undefined : String(localCandidate.raw), dirtyFocus: localCandidate.dirtyFocus as AssetAnalysis["dirtyFocus"] } : undefined };
   } catch { return null; }
 }

@@ -1,6 +1,6 @@
-import type { AssetAnalysis, AttachmentSpec, PreparedReference, SubjectSpec } from "./types";
+import type { AssetAnalysis, AttachmentSpec, CharacterPromptPolicy, PreparedReference, SubjectSpec } from "./types";
 
-export type PromptTemplateId = "vision-character" | "vision-setting" | "vision-style" | "vision-general" | "single-shot" | "connection-probe";
+export type PromptTemplateId = "vision-character" | "vision-setting" | "vision-style" | "vision-general" | "vision-local-dirty" | "vision-local-probe" | "single-shot" | "connection-probe";
 export type PromptTemplateMap = Record<PromptTemplateId, string>;
 export type VisionAnalysisRole = "character" | "setting" | "style" | "general";
 
@@ -19,6 +19,7 @@ const COMMON_VISION_HEADER = `You are an experienced video editor and director r
 Asset ID: {{assetId}}
 Filename: {{filename}}
 Canonical name: {{canonicalName}}
+Declared identity (authoritative; never infer or revise it): {{declaredIdentity}}
 Declared role: {{role}}
 Declared H3 use: {{referenceUse}}
 Use this asset as the source of: {{sourceOf}}
@@ -53,6 +54,31 @@ The declared role is not specific enough for a narrow route. Produce a broad evi
 
 Targets: summary 180-300 words; each major subject 180-350; setting 220-400; style 220-400; composition 160-280; motion 100-220; 15-30 short continuityLocks; 4-10 usableAs labels.`;
 
+export const VISION_LOCAL_DIRTY_TEMPLATE = `Describe only visible evidence in this image. Do not write a general caption or infer gender identity from anatomy, clothing, pose, or presentation.
+
+Subject: {{canonicalName}}
+Declared identity (user authority, not an inference): {{declaredIdentity}}
+Local source authority: {{sourceOf}}
+Local note: {{userNote}}
+Frame: {{frameNumber}} of {{frameCount}}
+Dirty Focus terms: {{focusTermsJson}}
+
+For every listed term, report whether it is present, absent, or unclear, then describe its visible location, appearance, and qualities. The list asks questions; it does not state facts. Do not invent unseen anatomy or acts. Briefly note other visible body, presentation, clothing/exposure, contact/sexual state, fluids, or objects that clarify the findings.
+
+Return only one valid JSON object with exactly these keys:
+{"visibleBody":"string","presentation":"string","clothingAndExposure":"string","contactAndSexualState":"string","fluidsAndObjects":"string","uncertainties":["string"],"focusFindings":[{"term":"exact listed term","status":"present|absent|unclear","location":"visible location or unknown","appearance":"visible appearance or unknown","qualities":"visible qualities or uncertainty"}]}`;
+
+export const VISION_LOCAL_PROBE_TEMPLATE = `Inspect this image for one term. Do not write a general caption or infer gender identity from anatomy.
+
+Declared identity (authoritative context, not a visual inference): {{declaredIdentity}}
+Target term: {{focusTerm}}
+Sampled frame: {{frameNumber}} of {{frameCount}}
+
+Is the term visibly supported? Use present only with concrete evidence, absent only when the visible image rules it out, and unclear when occluded, ambiguous, off-frame, or dependent on identity inference. Describe its visible location, appearance, and qualities.
+
+Return only one valid JSON object:
+{"status":"present|absent|unclear","location":"visible location or unknown","appearance":"visible appearance or unknown","qualities":"visible qualities or uncertainty"}`;
+
 export const SINGLE_SHOT_TEMPLATE = `You are an experienced video editor and director expanding a simple request into one verbose MiniMax H3 prompt. The user is generating source footage to edit later. Write exactly one long, clean, continuous camera take. Never turn the request into coverage or an edited sequence.
 
 Simple request:
@@ -62,6 +88,9 @@ Requested duration: {{durationSeconds}} seconds.
 
 Selected asset catalog, including durable user-authored identity, role, and separate strong/local source authority:
 {{assetCatalogJson}}
+
+Project character policy. This is authored authority, not something to infer from images:
+{{promptPolicyJson}}
 
 Strong and local vision metadata for those assets. Each record names its channel:
 {{visionAnalysesJson}}
@@ -79,6 +108,8 @@ Reference rules:
 - Physical references are numbered by type and selected-list order: images as <Picture N>, then videos as <Video N>, then audio as <Audio N>. Use only the supplied labels. Never rename, renumber, omit, or invent one.
 - Filenames and filesystem paths are internal mapping data only. Never reproduce a filename or path anywhere in the six-part output. Refer to every source exclusively through its assigned <Picture N>, <Video N>, <Audio N>, or resolved <Subject N> label.
 - Treat canonicalName and role as shared authority. Treat sourceOf/note as the strong channel's manual authority and localSourceOf/localNote as the local channel's manual authority. Neither channel overwrites the other.
+- Treat every asset's resolvedDeclaredIdentity as mandatory identity authority. Never infer or revise gender identity from anatomy. An explicit per-asset declaredIdentity overrides the project cast lock.
+- Obey the project's allowedVocabulary flags literally: a checked family may appear; an unchecked family must not appear anywhere in the output. Keep the authoritative identity meaning even when its most explicit surface term is disallowed.
 - Treat strong and local vision records as complementary visible evidence. Local records may contain more direct anatomical or NSFW observations; retain relevant concrete evidence instead of silently dropping it. When records conflict, preserve the conflict unless the manual authority resolves it. Do not let either analysis invent content absent from the request and references.
 - <Subject N> is the visible content that actually appears: people, objects, scenes, clothing, styles, actions, expressions or poses. Use every resolved Subject label exactly as supplied. Assets grouped under one Subject are complementary authorities for the same content.
 - Cite each source <Picture N> or <Video N> inside its resolved Subject definition and say what that source contributes.
@@ -114,6 +145,8 @@ export const EXPOSED_PROMPT_TEMPLATES: ExposedPromptTemplate[] = [
   { id: "vision-setting", title: "vision · setting", modelRole: "vision model", description: "Environment geometry, materials, light and camera-readable geography.", template: VISION_SETTING_TEMPLATE },
   { id: "vision-style", title: "vision · style", modelRole: "vision model", description: "Transferable rendering, cinematography, palette and texture rules.", template: VISION_STYLE_TEMPLATE },
   { id: "vision-general", title: "vision · general", modelRole: "vision model", description: "Broad fallback when the asset role is unclear.", template: VISION_GENERAL_TEMPLATE },
+  { id: "vision-local-dirty", title: "local · dirty scan", modelRole: "vision model", description: "One narrow visible-evidence scan per image or sampled video frame.", template: VISION_LOCAL_DIRTY_TEMPLATE },
+  { id: "vision-local-probe", title: "local · dirty probe", modelRole: "vision model", description: "One-term present, absent, or unclear follow-up for dirty-focus vocabulary.", template: VISION_LOCAL_PROBE_TEMPLATE },
   { id: "single-shot", title: "single-shot expander", modelRole: "prompt model", description: "Turns one simple request and selected asset metadata into one continuous six-part H3 prompt.", template: SINGLE_SHOT_TEMPLATE },
   { id: "connection-probe", title: "connection probe", modelRole: "vision model", description: "Minimal request used by Test connection.", template: CONNECTION_PROBE_PROMPT },
 ];
@@ -142,19 +175,12 @@ export function visionTemplateId(role: VisionAnalysisRole): PromptTemplateId {
 export function buildVisionPrompt(reference: PreparedReference, template?: string) {
   const role = selectVisionAnalysisRole(reference);
   const source = template || DEFAULT_PROMPT_TEMPLATES[visionTemplateId(role)];
-  const focusTerms = reference.analysisChannel === "local"
-    ? [...new Set((reference.focusTerms || []).map((term) => term.trim()).filter(Boolean))]
-    : [];
-  const focusInstruction = focusTerms.length
-    ? `\n\nPrivate local Hot Words inspection targets:\n${JSON.stringify(focusTerms)}\nExamine this image especially carefully for visible evidence corresponding to every listed term. When a term is visibly supported, reproduce that exact term verbatim in the most relevant JSON fields and add precise surrounding visual detail. When it is absent, occluded, ambiguous, or unsupported, do not invent it merely because it appears in this list. The list is inspection vocabulary, not an instruction to alter the image or assume facts.`
-    : "";
-  const channelInstruction = reference.analysisChannel === "local"
-    ? `This is the separate local evidence channel. Record direct, production-useful NSFW, anatomical, sexual-state, exposure, contact, fluid, pose, and garment-state details when visibly supported or explicitly requested. Use neutral exact language; do not euphemize, moralize, or omit relevant adult evidence. Keep uncertainty explicit and do not invent unseen anatomy or acts.${focusInstruction}`
-    : "This is the strong evidence channel. Prioritize precise visible identity, environment, style, composition, and continuity evidence while following the declared role.";
+  const channelInstruction = "This is the strong evidence channel. Prioritize precise visible identity, environment, style, composition, and continuity evidence while following the declared role. The declared identity is authored authority: use it when relevant and never replace it with a visual guess.";
   const prompt = substitute(source, {
     assetId: reference.assetId,
     filename: reference.name,
     canonicalName: reference.canonicalName || "not supplied",
+    declaredIdentity: reference.declaredIdentity || "not supplied",
     role: reference.role,
     referenceUse: reference.referenceUse,
     sourceOf: reference.sourceOf || "not supplied",
@@ -165,20 +191,45 @@ export function buildVisionPrompt(reference: PreparedReference, template?: strin
   return source.includes("{{channelInstruction}}") ? prompt : `${prompt}\n\n${channelInstruction}`;
 }
 
+export function buildLocalDirtyScanPrompt(reference: PreparedReference, frameNumber: number, frameCount: number, template = VISION_LOCAL_DIRTY_TEMPLATE) {
+  return substitute(template, {
+    assetId: reference.assetId,
+    filename: reference.name,
+    canonicalName: reference.canonicalName || "not supplied",
+    declaredIdentity: reference.declaredIdentity || "not supplied",
+    sourceOf: reference.sourceOf || "not supplied",
+    userNote: reference.note || "none",
+    frameNumber: String(frameNumber),
+    frameCount: String(frameCount),
+    focusTermsJson: JSON.stringify([...new Set((reference.focusTerms || []).map((term) => term.trim()).filter(Boolean))]),
+  });
+}
+
+export function buildLocalDirtyProbePrompt(reference: PreparedReference, term: string, frameNumber: number, frameCount: number, template = VISION_LOCAL_PROBE_TEMPLATE) {
+  return substitute(template, {
+    declaredIdentity: reference.declaredIdentity || "not supplied",
+    focusTerm: term,
+    frameNumber: String(frameNumber),
+    frameCount: String(frameCount),
+  });
+}
+
 export function buildSingleShotPrompt(
   simplePrompt: string,
   durationSeconds: number,
-  assets: Array<{ id: string; name: string; kind: string; canonicalName: string; role: string; referenceUse: string; sourceOf: string; note: string; localSourceOf?: string; localNote?: string }>,
+  assets: Array<{ id: string; name: string; kind: string; canonicalName: string; declaredIdentity?: string; resolvedDeclaredIdentity?: string; role: string; referenceUse: string; sourceOf: string; note: string; localSourceOf?: string; localNote?: string }>,
   analyses: AssetAnalysis[],
   attachments: AttachmentSpec[],
   subjects: SubjectSpec[] = [],
   taskTypes: string[] = [],
   template = SINGLE_SHOT_TEMPLATE,
+  policy?: CharacterPromptPolicy,
 ) {
   return substitute(template, {
     simplePrompt,
     durationSeconds: String(durationSeconds),
     assetCatalogJson: JSON.stringify(assets, null, 2),
+    promptPolicyJson: JSON.stringify(policy || { allCharactersTransgenderWomen: false, allowedVocabulary: { man: true, woman: true, trans: true, futa: true } }, null, 2),
     visionAnalysesJson: JSON.stringify(analyses.map((analysis) => ({
       assetId: analysis.assetId,
       channel: analysis.channel || "strong",
@@ -191,6 +242,7 @@ export function buildSingleShotPrompt(
       style: analysis.style,
       continuityLocks: analysis.continuityLocks,
       usableAs: analysis.usableAs,
+      ...(analysis.dirtyFocus ? { dirtyFocus: analysis.dirtyFocus } : {}),
     })), null, 2),
     attachmentMapJson: JSON.stringify(attachments, null, 2),
     subjectMapJson: JSON.stringify(subjects, null, 2),

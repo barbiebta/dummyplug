@@ -17,6 +17,7 @@ const asset = {
   previewUrl: "blob:test",
   selected: true,
   canonicalName: "Rabbit",
+  declaredIdentity: "transgender woman; she/her",
   role: "character",
   referenceUse: "subject",
   sourceOf: "identity, blue dress, and body proportions",
@@ -44,6 +45,7 @@ const asset = {
     motion: "none",
     continuityLocks: ["explicit body state"],
     usableAs: ["local anatomy"],
+    dirtyFocus: { declaredIdentity: "transgender woman; she/her", frames: [{ frame: 1, visibleBody: "visible body", presentation: "feminine", clothingAndExposure: "clothed", contactAndSexualState: "none", fluidsAndObjects: "none", uncertainties: [], termChecks: [] }], termChecks: [] },
   },
 };
 
@@ -85,7 +87,9 @@ test("sidecar round trip rebinds analysis to the newly loaded asset id", () => {
   assert.equal(imported?.localAnalysis.assetId, "asset-new");
   assert.equal(imported?.localAnalysis.summary, asset.localAnalysis.summary);
   assert.equal(imported?.localAnalysis.channel, "local");
+  assert.equal(imported?.localAnalysis.dirtyFocus.declaredIdentity, "transgender woman; she/her");
   assert.equal(imported?.canonicalName, "Rabbit");
+  assert.equal(imported?.declaredIdentity, "transgender woman; she/her");
   assert.equal(imported?.role, "character");
   assert.equal(imported?.referenceUse, "subject");
   assert.equal(imported?.sourceOf, "identity, blue dress, and body proportions");
@@ -116,6 +120,7 @@ test("manual metadata writes a sidecar before vision analysis exists", () => {
   const manualOnly = { ...asset, analysis: undefined, localAnalysis: undefined };
   const sidecar = makeReferenceSidecar(manualOnly, settings);
   assert.equal(sidecar.metadata.canonicalName, "Rabbit");
+  assert.equal(sidecar.metadata.declaredIdentity, "transgender woman; she/her");
   assert.equal(sidecar.metadata.referenceUse, "subject");
   assert.equal(sidecar.analysis, undefined);
   assert.equal(sidecar.localAnalysis, undefined);

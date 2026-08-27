@@ -86,7 +86,7 @@ test("legacy combined scaling selections migrate to split settings", () => {
     (({ refImageSize, inputScaling, outputContainer, audioCodec }) => ({ refImageSize, inputScaling, outputContainer, audioCodec }))(
       normalizeJobSettings({ defaultsVersion: 2, refImageSize: "match", inputScaling: "Fit", outputContainer: "mov", audioCodec: "opus" }),
     ),
-    { refImageSize: "match", inputScaling: "Fit", outputContainer: "mov", audioCodec: "opus" },
+    { refImageSize: "max", inputScaling: "Fit", outputContainer: "mov", audioCodec: "aac" },
   );
 });
 
@@ -111,6 +111,19 @@ test("the no-music checkbox blocks sealing unless the final section is N/A", asy
   };
   await assert.rejects(sealJobZip(input), /non_diegetic_music must be N\/A/);
   await assert.doesNotReject(sealJobZip({ ...input, requireNonDiegeticMusicNA: false }));
+});
+
+test("cast policy blocks sealing when a character Subject omits its required identity", async () => {
+  const characterAssets = assets.map((asset, index) => index === 0 ? { ...asset, role: "character", declaredIdentity: "" } : asset);
+  const compiled = compileAttachments(characterAssets);
+  const input = {
+    assets: characterAssets,
+    files: new Map(characterAssets.map((asset, index) => [asset.id, new Uint8Array([index, 7, 8, 9])])),
+    sidecars: new Map(), prompt: validPrompt(), request: "one take", duration: 5,
+    settings: DEFAULT_JOB_SETTINGS, subjects: compiled.subjects,
+  };
+  await assert.rejects(sealJobZip(input), /Cast lock identity is missing/);
+  await assert.doesNotReject(sealJobZip({ ...input, prompt: validPrompt().replace("<Subject 1> is Rabbit", "<Subject 1> is a transgender woman named Rabbit") }));
 });
 
 test("a randomized seed is resolved into the sealed manifest", async () => {
@@ -163,6 +176,7 @@ test("seals an independently verifiable REF2VA job archive", async () => {
   assert.equal(manifest.job_desc, "Rabbit walk");
   assert.equal(manifest.title, "Rabbit project");
   assert.deepEqual(manifest.workflow, { template: "dasiwa-ref2va", version: 1 });
+  assert.deepEqual(manifest.prompt_policy, DEFAULT_JOB_SETTINGS.characterPolicy);
   assert.deepEqual(manifest.generation, {
     width: 768, height: 1344, duration: 5, fps: 24, seed: 123456, steps: 25, sampler: "res_multistep", shift_video: 12, shift_audio: 3, ref_image_size: "max", input_scaling: "Auto",
     output: { container: "mp4", codec: "Auto", quality: 21, audio_codec: "aac", audio_bitrate: "192k" },
