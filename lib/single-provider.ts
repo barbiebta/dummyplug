@@ -1,4 +1,4 @@
-import { validateSingleShotPrompt } from "./single-h3.ts";
+import { enforceNonDiegeticMusicNA, validateSingleShotPrompt } from "./single-h3.ts";
 import { buildSingleShotPrompt, buildVisionPrompt, CONNECTION_PROBE_PROMPT, selectVisionAnalysisRole, visionTemplateId, type PromptTemplateMap } from "./single-prompts.ts";
 import type { AssetAnalysis, AttachmentSpec, ModelSettings, PreparedReference, SubjectSpec } from "./types.ts";
 
@@ -8,7 +8,7 @@ type AssetCatalogItem = { id: string; name: string; kind: string; canonicalName:
 type ProviderRequest =
   | { action: "test"; settings: ModelSettings; promptTemplates?: Partial<PromptTemplateMap> }
   | { action: "analyze"; settings: ModelSettings; references: PreparedReference[]; promptTemplates?: Partial<PromptTemplateMap> }
-  | { action: "expand-single"; settings: ModelSettings; simplePrompt: string; durationSeconds: number; assets: AssetCatalogItem[]; analyses: AssetAnalysis[]; attachments: AttachmentSpec[]; subjects: SubjectSpec[]; taskTypes: string[]; promptTemplates?: Partial<PromptTemplateMap> };
+  | { action: "expand-single"; settings: ModelSettings; simplePrompt: string; durationSeconds: number; assets: AssetCatalogItem[]; analyses: AssetAnalysis[]; attachments: AttachmentSpec[]; subjects: SubjectSpec[]; taskTypes: string[]; requireNonDiegeticMusicNA?: boolean; promptTemplates?: Partial<PromptTemplateMap> };
 
 function endpointFor(settings: ModelSettings) {
   if (settings.provider === "openrouter") return "https://openrouter.ai/api/v1/chat/completions";
@@ -17,6 +17,23 @@ function endpointFor(settings: ModelSettings) {
   if (/\/chat\/completions$/i.test(trimmed)) return trimmed;
   if (/\/v1$/i.test(trimmed)) return `${trimmed}/chat/completions`;
   return `${trimmed}/v1/chat/completions`;
+}
+
+function modelsEndpointFor(settings: ModelSettings) {
+  const chatEndpoint = endpointFor(settings);
+  return chatEndpoint.replace(/\/chat\/completions$/i, "/models");
+}
+
+async function testLocalConnection(settings: ModelSettings, signal: AbortSignal) {
+  const endpoint = modelsEndpointFor(settings);
+  const headers: Record<string, string> = {};
+  if (settings.apiKey.trim()) headers.authorization = `Bearer ${settings.apiKey.trim()}`;
+  let response: Response;
+  try { response = await fetch(endpoint, { headers, signal: AbortSignal.any([signal, AbortSignal.timeout(60_000)]) }); }
+  catch (error) { throw new Error(`Could not reach the local model server at ${endpoint}. ${error instanceof Error ? error.message : String(error)}`); }
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}: ${text.slice(0, 700)}`);
+  return `local server connected · ${settings.visionModel}`;
 }
 
 function extractContent(payload: unknown) {
@@ -103,6 +120,28 @@ function normalizeAnalysis(candidate: Partial<AssetAnalysis>, reference: Prepare
   };
 }
 
+function mergeSampleAnalyses(samples: AssetAnalysis[], reference: PreparedReference): AssetAnalysis {
+  if (samples.length === 1) return samples[0];
+  const joinField = (field: "summary" | "setting" | "style" | "composition" | "motion") => samples
+    .map((sample, index) => `Frame ${index + 1}: ${sample[field]}`)
+    .join("\n");
+  const unique = (items: string[]) => [...new Set(items.map((item) => item.trim()).filter(Boolean))];
+  return {
+    assetId: reference.assetId,
+    channel: reference.analysisChannel || "local",
+    analysisRole: selectVisionAnalysisRole(reference),
+    summary: joinField("summary"),
+    subjects: samples.flatMap((sample, index) => sample.subjects.map((subject) => `Frame ${index + 1}: ${subject}`)),
+    setting: joinField("setting"),
+    style: joinField("style"),
+    composition: joinField("composition"),
+    motion: joinField("motion"),
+    continuityLocks: unique(samples.flatMap((sample) => sample.continuityLocks)),
+    usableAs: unique(samples.flatMap((sample) => sample.usableAs)),
+    raw: JSON.stringify(samples.map((sample, index) => ({ frame: index + 1, response: sample.raw || "" })), null, 2),
+  };
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json() as ProviderRequest;
@@ -110,7 +149,9 @@ export async function POST(request: Request) {
     if (body.settings.provider === "demo") return Response.json({ error: "Demo mode does not call a provider." }, { status: 400 });
 
     if (body.action === "test") {
-      const result = await chat(body.settings, body.settings.visionModel, [{ role: "user", content: body.promptTemplates?.["connection-probe"]?.trim() || CONNECTION_PROBE_PROMPT }], { timeoutMs: 60_000, maxTokens: 32, operation: "Connection test", signal: request.signal });
+      const result = body.settings.provider === "local"
+        ? await testLocalConnection(body.settings, request.signal)
+        : await chat(body.settings, body.settings.visionModel, [{ role: "user", content: body.promptTemplates?.["connection-probe"]?.trim() || CONNECTION_PROBE_PROMPT }], { timeoutMs: 60_000, maxTokens: 32, operation: "Connection test", signal: request.signal });
       return Response.json({ ok: true, message: result.trim().slice(0, 180) });
     }
 
@@ -120,10 +161,19 @@ export async function POST(request: Request) {
       for (const reference of body.references) {
         const role = selectVisionAnalysisRole(reference);
         const prompt = buildVisionPrompt(reference, body.promptTemplates?.[visionTemplateId(role)]?.trim() || undefined);
-        const content: Array<Record<string, unknown>> = [{ type: "text", text: prompt }];
-        for (const url of reference.dataUrls) content.push({ type: "image_url", image_url: { url } });
-        const raw = await chat(body.settings, body.settings.visionModel, [{ role: "user", content }], { jsonMode: true, timeoutMs: 360_000, maxTokens: 8_192, operation: `Vision analysis for ${reference.name}`, signal: request.signal });
-        analyses.push(normalizeAnalysis({ ...parseJson<Partial<AssetAnalysis>>(raw), raw }, reference));
+        const splitLocalFrames = body.settings.provider === "local" && reference.dataUrls.length > 1;
+        const batches = splitLocalFrames ? reference.dataUrls.map((url) => [url]) : [reference.dataUrls];
+        const samples: AssetAnalysis[] = [];
+        for (let index = 0; index < batches.length; index += 1) {
+          const framePrompt = splitLocalFrames
+            ? `${prompt}\n\nThis is sampled frame ${index + 1} of ${batches.length} from the same source video. Analyze only this frame. Do not claim temporal motion that is not visible in this still; describe pose and state so the three frame records can be compared after all requests finish.`
+            : prompt;
+          const content: Array<Record<string, unknown>> = [{ type: "text", text: framePrompt }];
+          for (const url of batches[index]) content.push({ type: "image_url", image_url: { url } });
+          const raw = await chat(body.settings, body.settings.visionModel, [{ role: "user", content }], { jsonMode: true, timeoutMs: 360_000, maxTokens: body.settings.provider === "local" ? 4_096 : 8_192, operation: `Vision analysis for ${reference.name}${splitLocalFrames ? ` frame ${index + 1}/${batches.length}` : ""}`, signal: request.signal });
+          samples.push(normalizeAnalysis({ ...parseJson<Partial<AssetAnalysis>>(raw), raw }, reference));
+        }
+        analyses.push(mergeSampleAnalyses(samples, reference));
       }
       return Response.json({ analyses });
     }
@@ -138,7 +188,8 @@ export async function POST(request: Request) {
         operation: "Single-shot prompt expansion",
         signal: request.signal,
       })).replace(/^```(?:text|markdown)?\s*/i, "").replace(/\s*```$/i, "").trim();
-      const raw = replaceFilenameReferences(modelReturn, body.attachments);
+      const replaced = replaceFilenameReferences(modelReturn, body.attachments);
+      const raw = body.requireNonDiegeticMusicNA ? enforceNonDiegeticMusicNA(replaced) : replaced;
       const validation = validateSingleShotPrompt(raw, body.attachments, body.subjects || []);
       if (!validation.valid) return Response.json({ error: `The prompt model violated the single-shot H3 format: ${JSON.stringify(validation)}`, raw, retained: true }, { status: 422 });
       return Response.json({ prompt: raw, raw });

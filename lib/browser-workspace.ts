@@ -39,6 +39,7 @@ export interface PersistedWorkspace {
   generatedPrompt: string;
   promptHistory?: string[];
   jobSettings?: JobSettings;
+  requireNonDiegeticMusicNA?: boolean;
 }
 
 function openDatabase() {

@@ -96,6 +96,23 @@ test("video trim validation enforces known source duration", () => {
   assert.match(validateVideoTrim({ ...assets[2], trimEnd: 12 }), /exceeds source duration/);
 });
 
+test("the no-music checkbox blocks sealing unless the final section is N/A", async () => {
+  const compiled = compileAttachments(assets);
+  const input = {
+    assets,
+    files: new Map(assets.map((asset, index) => [asset.id, new Uint8Array([index, 7, 8, 9])])),
+    sidecars: new Map(),
+    prompt: validPrompt().replace("non_diegetic_music:\nN/A", "non_diegetic_music:\nlow strings"),
+    request: "one take",
+    duration: 5,
+    settings: DEFAULT_JOB_SETTINGS,
+    subjects: compiled.subjects,
+    requireNonDiegeticMusicNA: true,
+  };
+  await assert.rejects(sealJobZip(input), /non_diegetic_music must be N\/A/);
+  await assert.doesNotReject(sealJobZip({ ...input, requireNonDiegeticMusicNA: false }));
+});
+
 test("a randomized seed is resolved into the sealed manifest", async () => {
   const seed = randomSeed();
   const compiled = compileAttachments(assets);

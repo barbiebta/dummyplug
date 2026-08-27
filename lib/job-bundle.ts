@@ -1,5 +1,5 @@
 import JSZip from "jszip";
-import { compileAttachments, validateSingleShotPrompt } from "./single-h3.ts";
+import { compileAttachments, hasNonDiegeticMusicNA, validateSingleShotPrompt } from "./single-h3.ts";
 import { DIRECTOR_INPUT_SCALING_OPTIONS } from "./types.ts";
 import type { AssetRecord, JobSettings, SubjectSpec } from "./types.ts";
 
@@ -20,6 +20,8 @@ export interface SealJobInput {
   projectName?: string;
   /** Human-readable per-job description used to derive the job ID. */
   jobDesc?: string;
+  /** When true, sealing requires the explicit no-music value in the final prompt. */
+  requireNonDiegeticMusicNA?: boolean;
 }
 
 export const DEFAULT_JOB_SETTINGS: JobSettings = {
@@ -136,6 +138,7 @@ export async function sealJobZip(input: SealJobInput) {
   ];
   const promptValidation = validateSingleShotPrompt(input.prompt, compiled.attachments, input.subjects);
   if (!promptValidation.valid) errors.push("The six-section H3 prompt is not valid for the current reference snapshot.");
+  if (input.requireNonDiegeticMusicNA && !hasNonDiegeticMusicNA(input.prompt)) errors.push("non_diegetic_music must be N/A while the job checkbox is on.");
   for (const asset of input.assets) if (!input.files.has(asset.id)) errors.push(`${asset.name}: source file is not loaded.`);
   if (errors.length) throw new Error(errors.join(" "));
 

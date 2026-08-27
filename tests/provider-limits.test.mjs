@@ -14,6 +14,23 @@ const validSingle = [
   "non_diegetic_music:", "N/A",
 ].join("\n");
 
+test("local connection test uses the models endpoint instead of sending JoyCaption a zero-image chat", async () => {
+  const originalFetch = globalThis.fetch;
+  let observedUrl = "";
+  let observedMethod = "";
+  globalThis.fetch = async (url, init) => {
+    observedUrl = String(url);
+    observedMethod = String(init?.method || "GET");
+    return Response.json({ data: [{ id: "joycaption" }] });
+  };
+  try {
+    const response = await POST(new Request("http://localhost/api/provider", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "test", settings: { ...settings, provider: "local", baseUrl: "http://127.0.0.1:8080", visionModel: "joycaption" } }) }));
+    assert.equal(response.status, 200);
+    assert.equal(observedUrl, "http://127.0.0.1:8080/v1/models");
+    assert.equal(observedMethod, "GET");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("vision analysis uses the role-routed recipe and expanded allowance", async () => {
   const originalFetch = globalThis.fetch;
   let observed;
@@ -46,6 +63,44 @@ test("local vision analysis preserves its channel through the provider response"
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("local video analysis sends sampled frames to JoyCaption one at a time and merges them", async () => {
+  const originalFetch = globalThis.fetch;
+  const observed = [];
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    observed.push(body);
+    const frame = observed.length;
+    return Response.json({ choices: [{ message: { content: JSON.stringify({
+      summary: `frame ${frame} evidence`,
+      subjects: [`Rabbit pose ${frame}`],
+      setting: `setting ${frame}`,
+      style: `style ${frame}`,
+      composition: `composition ${frame}`,
+      motion: `pose state ${frame}`,
+      continuityLocks: ["identity", `state ${frame}`],
+      usableAs: ["character"],
+    }) } }] });
+  };
+  try {
+    const response = await POST(new Request("http://localhost/api/provider", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+      action: "analyze",
+      settings: { ...settings, provider: "local", baseUrl: "http://127.0.0.1:8080", visionModel: "joycaption" },
+      references: [{ assetId: "rabbit-video", analysisChannel: "local", name: "rabbit.mov", kind: "video", canonicalName: "Rabbit", role: "character", referenceUse: "subject", sourceOf: "performance", note: "", dataUrls: ["data:image/jpeg;base64,AA==", "data:image/jpeg;base64,BB==", "data:image/jpeg;base64,CC=="] }],
+    }) }));
+    assert.equal(response.status, 200);
+    assert.equal(observed.length, 3);
+    assert.deepEqual(observed.map((requestBody) => requestBody.messages[0].content.filter((part) => part.type === "image_url").length), [1, 1, 1]);
+    assert.deepEqual(observed.map((requestBody) => requestBody.max_tokens), [4096, 4096, 4096]);
+    assert.match(observed[0].messages[0].content[0].text, /sampled frame 1 of 3/i);
+    assert.match(observed[2].messages[0].content[0].text, /sampled frame 3 of 3/i);
+    const analysis = (await response.json()).analyses[0];
+    assert.equal(analysis.channel, "local");
+    assert.match(analysis.summary, /Frame 1: frame 1 evidence/);
+    assert.match(analysis.summary, /Frame 3: frame 3 evidence/);
+    assert.deepEqual(analysis.continuityLocks, ["identity", "state 1", "state 2", "state 3"]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("single-shot expansion uses the prompt model and one-take recipe", async () => {
   const originalFetch = globalThis.fetch;
   let observed;
@@ -61,6 +116,16 @@ test("single-shot expansion uses the prompt model and one-take recipe", async ()
     assert.match(observed.messages[0].content, /No cuts, cutaways, inserts/);
     assert.match(observed.messages[0].content, /"sourceOf": "identity and wardrobe"/);
     assert.equal((await response.json()).prompt, validSingle);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("checked no-music guard normalizes the provider return before validation", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: validSingle.replace("non_diegetic_music:\nN/A", "non_diegetic_music:\nominous strings") } }] });
+  try {
+    const response = await POST(new Request("http://localhost/api/provider", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "expand-single", settings, simplePrompt: "Rabbit walks.", durationSeconds: 10, assets: [{ id: "rabbit", name: "rabbit.png", kind: "image", canonicalName: "Rabbit", role: "character", referenceUse: "subject", sourceOf: "identity", note: "" }], analyses: [], attachments: [attachment], subjects: [subject], taskTypes: ["reference generation"], requireNonDiegeticMusicNA: true }) }));
+    assert.equal(response.status, 200);
+    assert.match((await response.json()).prompt, /non_diegetic_music: N\/A$/);
   } finally { globalThis.fetch = originalFetch; }
 });
 

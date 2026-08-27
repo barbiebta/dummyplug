@@ -97,6 +97,7 @@ function cleanDraft(projectId: string, value: unknown): ProjectDraft {
     fixedSeed: Number.isSafeInteger(raw.fixedSeed) && Number(raw.fixedSeed) >= 0 ? Number(raw.fixedSeed) : DEFAULT_PROJECT_DRAFT.fixedSeed,
     generatedPrompt: typeof raw.generatedPrompt === "string" ? raw.generatedPrompt : "",
     generatedPromptHistory: history,
+    requireNonDiegeticMusicNA: raw.requireNonDiegeticMusicNA !== false,
   };
 }
 

@@ -64,6 +64,7 @@ export interface ProjectDraft {
   fixedSeed: number;
   generatedPrompt: string;
   generatedPromptHistory: string[];
+  requireNonDiegeticMusicNA: boolean;
 }
 
 export const DEFAULT_PROJECT_DRAFT = {
@@ -75,6 +76,7 @@ export const DEFAULT_PROJECT_DRAFT = {
   fixedSeed: 616271471367168,
   generatedPrompt: "",
   generatedPromptHistory: [] as string[],
+  requireNonDiegeticMusicNA: true,
 };
 
 export interface ProjectAssetSidecar {

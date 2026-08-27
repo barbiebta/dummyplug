@@ -117,6 +117,18 @@ export function validateSingleShotPrompt(prompt: string, attachments: Attachment
   };
 }
 
+export function hasNonDiegeticMusicNA(prompt: string) {
+  return /^[ \t]*non_diegetic_music:[ \t]*N\/A[ \t]*$/mi.test(prompt)
+    || /^[ \t]*non_diegetic_music:[ \t]*\r?\n[ \t]*N\/A[ \t]*$/mi.test(prompt);
+}
+
+export function enforceNonDiegeticMusicNA(prompt: string) {
+  const heading = "non_diegetic_music:";
+  const index = prompt.toLocaleLowerCase().lastIndexOf(heading);
+  if (index < 0) return `${prompt.trimEnd()}\n${heading} N/A`;
+  return `${prompt.slice(0, index).trimEnd()}\n${heading} N/A`;
+}
+
 export function makeDemoAnalysis(asset: AssetRecord) {
   return {
     assetId: asset.id,

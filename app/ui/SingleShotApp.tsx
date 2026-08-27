@@ -11,11 +11,12 @@ import { loadBrowserWorkspace, saveBrowserWorkspace, type PersistedDirectoryHand
 import { DEFAULT_JOB_SETTINGS, normalizeJobSettings, randomSeed, sealJobZip, sha256Hex, validateJobSettings, validateVideoTrim } from "../../lib/job-bundle";
 import { createJobId, DEFAULT_VERB_FAMILIES, deriveJobDesc, normalizeJobDesc } from "../../lib/job-identity";
 import type { VerbFamily } from "../../lib/job-identity";
+import { auditHotWords, parseHotWords } from "../../lib/hot-words";
 import { DEFAULT_PROJECT_OUTPUT_SETTINGS } from "../../lib/project-contract";
 import type { ProjectAsset, ProjectManifest, ProjectOutputSettings } from "../../lib/project-contract";
 import { createProject, createProjectFolder, importProjectAsset, listProjects, loadProject, moveProjectAsset, moveProjectFolder, projectAssetUrl, refreshProjectAssets, removeProjectFolder, renameProjectAsset, renameProjectFolder, saveProjectDraft, trashProjectAsset, updateProjectAsset, updateProjectSettings } from "../../lib/project-library-client";
 import { makeReferenceSidecar, readReferenceSidecar, sidecarMatchKey, sidecarName } from "../../lib/reference-sidecar";
-import { compileAttachments, makeDemoAnalysis, validateSingleShotPrompt } from "../../lib/single-h3";
+import { compileAttachments, enforceNonDiegeticMusicNA, hasNonDiegeticMusicNA, makeDemoAnalysis, validateSingleShotPrompt } from "../../lib/single-h3";
 import { DEFAULT_PROMPT_TEMPLATES, EXPOSED_PROMPT_TEMPLATES, type PromptTemplateId, type PromptTemplateMap } from "../../lib/single-prompts";
 import type { AssetAnalysis, AssetKind, AssetRecord, AssetRole, JobSettings, ModelSettings, PreparedReference, ReferenceUse } from "../../lib/types";
 
@@ -268,7 +269,7 @@ export function SingleShotApp() {
   const [settings, setSettings] = useState<ModelSettings>(DEFAULT_SETTINGS);
   const [localSettings, setLocalSettings] = useState<ModelSettings>(DEFAULT_LOCAL_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsPage, setSettingsPage] = useState<"connection" | "prompts" | "naming">("connection");
+  const [settingsPage, setSettingsPage] = useState<"connection" | "prompts" | "naming" | "hot-words">("connection");
   const [promptOverrides, setPromptOverrides] = useState<Partial<PromptTemplateMap>>({});
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null);
   const [storageReady, setStorageReady] = useState(false);
@@ -292,6 +293,8 @@ export function SingleShotApp() {
   const [libraryFolders, setLibraryFolders] = useState<string[]>([]);
   const [verbFamilies, setVerbFamilies] = useState(DEFAULT_VERB_FAMILIES);
   const [verbText, setVerbText] = useState(() => verbVocabularyText(DEFAULT_VERB_FAMILIES));
+  const [hotWordText, setHotWordText] = useState("");
+  const [requireNonDiegeticMusicNA, setRequireNonDiegeticMusicNA] = useState(true);
   const [legacyAssetCount, setLegacyAssetCount] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -311,6 +314,7 @@ export function SingleShotApp() {
       const sessionKey = sessionStorage.getItem("dummyplug.single.v2.apiKey") || "";
       const localSessionKey = sessionStorage.getItem("dummyplug.single.v1.localApiKey") || "";
       const rawPrompts = localStorage.getItem("dummyplug.singlePromptOverrides.v2");
+      setHotWordText(localStorage.getItem("dummyplug.hotWords.v1") || "");
       if (rawSettings) {
         try {
           const saved = JSON.parse(rawSettings) as Record<string, unknown>;
@@ -391,6 +395,7 @@ export function SingleShotApp() {
         setJobSettings(normalizeJobSettings(saved.jobSettings));
         setGeneratedPrompt(saved.generatedPrompt || "");
         setPromptHistory((saved.promptHistory || []).filter(Boolean).slice(0, 5));
+        setRequireNonDiegeticMusicNA(saved.requireNonDiegeticMusicNA !== false);
         if (restored.length) setMessage(`Restored ${restored.length} asset${restored.length === 1 ? "" : "s"} from the new single-shot workspace.`);
       }
       setStorageReady(true);
@@ -419,6 +424,12 @@ export function SingleShotApp() {
     if (Object.keys(promptOverrides).length) localStorage.setItem("dummyplug.singlePromptOverrides.v2", JSON.stringify(promptOverrides));
     else localStorage.removeItem("dummyplug.singlePromptOverrides.v2");
   }, [promptOverrides, storageReady]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    if (hotWordText) localStorage.setItem("dummyplug.hotWords.v1", hotWordText);
+    else localStorage.removeItem("dummyplug.hotWords.v1");
+  }, [hotWordText, storageReady]);
 
   useEffect(() => {
     if (!storageReady) return;
@@ -481,13 +492,14 @@ export function SingleShotApp() {
         generatedPrompt,
         promptHistory,
         jobSettings,
+        requireNonDiegeticMusicNA,
       };
       const light: PersistedWorkspace = { ...persisted, metadataDirectory: undefined, assets: persisted.assets.map(({ record }) => ({ record })) };
       try { localStorage.setItem("dummyplug.single.v2.workspace.light", JSON.stringify(light)); } catch { /* IndexedDB is primary */ }
       void saveBrowserWorkspace(persisted).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [activeProject, assets, durationSeconds, generatedPrompt, jobSettings, promptHistory, selectedAssetId, simplePrompt, storageReady]);
+  }, [activeProject, assets, durationSeconds, generatedPrompt, jobSettings, promptHistory, requireNonDiegeticMusicNA, selectedAssetId, simplePrompt, storageReady]);
 
   useEffect(() => {
     if (!activeProject || draftReadyProjectId !== activeProject.id) return;
@@ -501,10 +513,11 @@ export function SingleShotApp() {
         fixedSeed: jobSettings.seed,
         generatedPrompt,
         generatedPromptHistory: promptHistory,
+        requireNonDiegeticMusicNA,
       }).catch((error) => setMessage(error instanceof Error ? error.message : "Could not save the project draft."));
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [activeProject, attachmentOrder, draftReadyProjectId, durationSeconds, generatedPrompt, jobDesc, jobSettings.seed, promptHistory, seedMode, simplePrompt]);
+  }, [activeProject, attachmentOrder, draftReadyProjectId, durationSeconds, generatedPrompt, jobDesc, jobSettings.seed, promptHistory, requireNonDiegeticMusicNA, seedMode, simplePrompt]);
 
   async function openProject(projectId: string) {
     setDraftReadyProjectId("");
@@ -528,6 +541,7 @@ export function SingleShotApp() {
     setJobSettings({ ...DEFAULT_JOB_SETTINGS, ...loaded.project.outputSettings, title: loaded.project.name, seed: loaded.draft.fixedSeed });
     setGeneratedPrompt(loaded.draft.generatedPrompt);
     setPromptHistory(loaded.draft.generatedPromptHistory.slice(0, 5));
+    setRequireNonDiegeticMusicNA(loaded.draft.requireNonDiegeticMusicNA !== false);
     localStorage.setItem("dummyplug.lastProjectId", loaded.project.id);
     setProjectDialogOpen(false);
     setMessage(`Opened ${loaded.project.name}; ${records.length} managed asset${records.length === 1 ? "" : "s"} ready.`);
@@ -651,6 +665,8 @@ export function SingleShotApp() {
   const validation = generatedPrompt ? validateSingleShotPrompt(generatedPrompt, compiled.attachments, compiled.subjects) : null;
   const analyzedCount = assets.filter((asset) => asset.analysis || asset.localAnalysis).length;
   const resolvedJobDescPreview = deriveJobDesc(simplePrompt, chosenAssets, jobDesc, verbFamilies);
+  const hotWords = useMemo(() => parseHotWords(hotWordText), [hotWordText]);
+  const hotWordAudit = useMemo(() => auditHotWords(hotWords, simplePrompt, chosenAssets, generatedPrompt), [chosenAssets, generatedPrompt, hotWords, simplePrompt]);
   const visibleAssets = assets.filter((asset) => {
     if (assetFilterKind !== "all" && asset.kind !== assetFilterKind) return false;
     const query = assetFilterText.trim().toLocaleLowerCase();
@@ -659,6 +675,7 @@ export function SingleShotApp() {
   });
   const sealIssues = [
     ...(!generatedPrompt.trim() ? ["Write or generate the six-part prompt."] : validation && !validation.valid ? ["The six-part prompt does not validate against the current selected references."] : []),
+    ...(requireNonDiegeticMusicNA && generatedPrompt.trim() && !hasNonDiegeticMusicNA(generatedPrompt) ? ["non_diegetic_music must be N/A while the checkbox is on."] : []),
     ...compiled.warnings,
     ...validateJobSettings(jobSettings, durationSeconds),
     ...chosenAssets.map(validateVideoTrim).filter((issue): issue is string => Boolean(issue)),
@@ -948,6 +965,7 @@ export function SingleShotApp() {
         attachments: compiled.attachments,
         subjects: compiled.subjects,
         taskTypes: compiled.taskTypes,
+        requireNonDiegeticMusicNA,
       });
       const prompt = String(payload.prompt || "").trim();
       if (!prompt) throw new Error("The prompt model returned nothing.");
@@ -1015,6 +1033,7 @@ export function SingleShotApp() {
         jobId,
         projectName: activeProject?.name,
         jobDesc: resolvedJobDesc,
+        requireNonDiegeticMusicNA,
         now: createdAt,
       });
       const blob = new Blob([result.bytes.slice().buffer], { type: "application/zip" });
@@ -1147,6 +1166,9 @@ export function SingleShotApp() {
           <button className="primary generate-single" disabled={Boolean(busy) || !simplePrompt.trim() || !chosenAssets.length} onClick={() => void generatePrompt()}>{busy === "generate" ? "writing prompt…" : "generate six-part prompt"}</button>
           {promptHistory.length > 0 && <label className="prompt-history"><span>recent generated versions</span><select value="" onChange={(event) => { const remembered = promptHistory[Number(event.target.value)]; if (remembered) setGeneratedPrompt(remembered); }}><option value="" disabled>restore one of the last {promptHistory.length}</option>{promptHistory.map((prompt, index) => <option value={index} key={`${index}-${prompt.slice(0, 24)}`}>version {index + 1} · {prompt.replace(/\s+/g, " ").slice(0, 52)}</option>)}</select></label>}
           <textarea className="prompt-output single-output" value={generatedPrompt} onChange={(event) => setGeneratedPrompt(event.target.value)} placeholder="The expanded six-part H3 prompt appears here. It will contain exactly one [Shot 1]." spellCheck={false} />
+          <label className="music-na-control"><input type="checkbox" checked={requireNonDiegeticMusicNA} onChange={(event) => { const checked = event.target.checked; setRequireNonDiegeticMusicNA(checked); if (checked && generatedPrompt.trim()) setGeneratedPrompt(enforceNonDiegeticMusicNA(generatedPrompt)); }} /><code>non_diegetic_music: N/A</code></label>
+          {generatedPrompt.trim() && hotWordAudit.missingFromMetadata.length > 0 && <div className="seal-feedback hot-word-warning"><strong>Some metadata Hot Words don&apos;t appear in final prompt!</strong><span>missing: {hotWordAudit.missingFromMetadata.join(", ")}</span></div>}
+          {generatedPrompt.trim() && hotWordAudit.missingFromSimplePrompt.length > 0 && <div className="seal-feedback hot-word-warning"><strong>Some Hot Words from simple prompt don&apos;t appear in final prompt!</strong><span>missing: {hotWordAudit.missingFromSimplePrompt.join(", ")}</span></div>}
           <div className={`seal-feedback ${sealIssues.length ? "error" : sealFeedback ? "active" : "ready"}`} aria-live="polite">{sealIssues.length ? sealIssues[0] : sealFeedback || "Ready to hash and seal this immutable job."}</div>
           <div className="single-actions"><button className="secondary" disabled={!generatedPrompt} onClick={() => void navigator.clipboard.writeText(generatedPrompt).then(() => setMessage("Prompt copied."))}>copy prompt</button><button className="primary" disabled={!generatedPrompt || busy === "export"} onClick={() => void sealBundle()}>{busy === "export" ? "hashing + sealing…" : "seal job zip"}</button></div>
         </aside>
@@ -1154,11 +1176,11 @@ export function SingleShotApp() {
 
       <ProjectDialog open={projectDialogOpen} projects={projects} activeProjectId={activeProject?.id || ""} activeProjectName={activeProject?.name || ""} activeProjectPath={activeProject ? `${projectRoot.replace(/[\\/]$/, "")}\\${activeProject.name}` : projectRoot} settings={activeProject?.outputSettings || DEFAULT_PROJECT_OUTPUT_SETTINGS} onClose={() => setProjectDialogOpen(false)} onSelect={(id) => { void openProject(id).catch((error) => setMessage(error instanceof Error ? error.message : "Could not open the project.")); }} onCreate={createAndOpenProject} legacyAssetCount={legacyAssetCount} onMigrate={migrateLegacyWorkspace} onSettingsChange={(patch) => void patchProjectOutputSettings(patch)} />
 
-      {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="settings-sheet" role="dialog" aria-modal="true"><div className="settings-head"><div><span className="heart-large">♥</span><div><h2>{settingsPage === "connection" ? "model connections" : settingsPage === "prompts" ? "system prompts" : "job naming"}</h2><p>{settingsPage === "connection" ? "Separate strong and local analysis paths; strong also writes the final prompt." : settingsPage === "prompts" ? "The exact recipes used by this reduced workflow." : "Editable verb families used by automatic job descriptions."}</p></div></div><button onClick={() => setSettingsOpen(false)} aria-label="Close settings">×</button></div><nav className="inline-settings-tabs settings-tabs-three"><button className={settingsPage === "connection" ? "active" : ""} onClick={() => setSettingsPage("connection")}>connection</button><button className={settingsPage === "prompts" ? "active" : ""} onClick={() => setSettingsPage("prompts")}>prompts</button><button className={settingsPage === "naming" ? "active" : ""} onClick={() => setSettingsPage("naming")}>naming</button></nav>{settingsPage === "connection" ? <>
+      {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="settings-sheet" role="dialog" aria-modal="true"><div className="settings-head"><div><span className="heart-large">♥</span><div><h2>{settingsPage === "connection" ? "model connections" : settingsPage === "prompts" ? "system prompts" : settingsPage === "naming" ? "job naming" : "hot words"}</h2><p>{settingsPage === "connection" ? "Separate strong and local analysis paths; strong also writes the final prompt." : settingsPage === "prompts" ? "The exact recipes used by this reduced workflow." : settingsPage === "naming" ? "Editable verb families used by automatic job descriptions." : "Private carry-through terms checked after prompt generation."}</p></div></div><button onClick={() => setSettingsOpen(false)} aria-label="Close settings">×</button></div><nav className="inline-settings-tabs settings-tabs-four"><button className={settingsPage === "connection" ? "active" : ""} onClick={() => setSettingsPage("connection")}>connection</button><button className={settingsPage === "prompts" ? "active" : ""} onClick={() => setSettingsPage("prompts")}>prompts</button><button className={settingsPage === "naming" ? "active" : ""} onClick={() => setSettingsPage("naming")}>naming</button><button className={settingsPage === "hot-words" ? "active" : ""} onClick={() => setSettingsPage("hot-words")}>hot words</button></nav>{settingsPage === "connection" ? <>
         <div className={`settings-status ${busy ? "active" : ""}`} aria-live="polite"><strong>{busy?.startsWith("test-") ? "testing connection…" : busy ? "request running…" : "provider status"}</strong><p>{message}</p></div>
         <div className="connection-profiles"><ConnectionEditor channel="strong" value={settings} status={providerStatus} busy={Boolean(busy)} onChange={setSettings} onTest={() => void testProvider("strong")} /><ConnectionEditor channel="local" value={localSettings} status={localProviderStatus} busy={Boolean(busy)} onChange={setLocalSettings} onTest={() => void testProvider("local")} /></div>
         <div className="settings-actions"><button className="secondary" onClick={() => { setSettings(DEFAULT_SETTINGS); setLocalSettings(DEFAULT_LOCAL_SETTINGS); }}>reset models</button><button className="secondary request-reset" onClick={cancelRequest}>{busy ? "cancel request" : "reset request"}</button><button className="primary" onClick={() => setSettingsOpen(false)}>done</button></div>
-      </> : settingsPage === "prompts" ? <><div className="prompt-registry-intro"><strong>DaSiWa single-take recipes</strong><p>Vision recipes create durable asset evidence. The final recipe applies the official full-reference label roles while expanding one request into one uninterrupted take.</p><button className="secondary" onClick={() => setPromptOverrides({})}>reset to defaults</button></div><div className="prompt-registry">{EXPOSED_PROMPT_TEMPLATES.map((item) => <article className="system-prompt-card" key={item.id}><div className="system-prompt-head"><div><h3>{item.title}</h3><span>{item.modelRole}</span></div><button className="secondary" onClick={() => { void navigator.clipboard.writeText(promptOverrides[item.id] ?? item.template); setCopiedPromptId(item.id); window.setTimeout(() => setCopiedPromptId(null), 1200); }}>{copiedPromptId === item.id ? "copied" : "copy"}</button></div><p>{item.description}</p><textarea value={promptOverrides[item.id] ?? item.template} onChange={(event) => patchPromptTemplate(item.id, event.target.value)} spellCheck={false} /></article>)}</div></> : <div className="naming-settings"><p>One family per line: <code>walk: walk, walks, walked, walking</code>. “to be” is deliberately excluded.</p><textarea value={verbText} onChange={(event) => setVerbText(event.target.value)} onBlur={() => commitVerbVocabulary()} spellCheck={false} /><div><button className="secondary" onClick={resetVerbVocabulary}>reset vocabulary</button><button className="primary" onClick={() => commitVerbVocabulary()}>save vocabulary</button></div></div>}
+      </> : settingsPage === "prompts" ? <><div className="prompt-registry-intro"><strong>DaSiWa single-take recipes</strong><p>Vision recipes create durable asset evidence. The final recipe applies the official full-reference label roles while expanding one request into one uninterrupted take.</p><button className="secondary" onClick={() => setPromptOverrides({})}>reset to defaults</button></div><div className="prompt-registry">{EXPOSED_PROMPT_TEMPLATES.map((item) => <article className="system-prompt-card" key={item.id}><div className="system-prompt-head"><div><h3>{item.title}</h3><span>{item.modelRole}</span></div><button className="secondary" onClick={() => { void navigator.clipboard.writeText(promptOverrides[item.id] ?? item.template); setCopiedPromptId(item.id); window.setTimeout(() => setCopiedPromptId(null), 1200); }}>{copiedPromptId === item.id ? "copied" : "copy"}</button></div><p>{item.description}</p><textarea value={promptOverrides[item.id] ?? item.template} onChange={(event) => patchPromptTemplate(item.id, event.target.value)} spellCheck={false} /></article>)}</div></> : settingsPage === "naming" ? <div className="naming-settings"><p>One family per line: <code>walk: walk, walks, walked, walking</code>. “to be” is deliberately excluded.</p><textarea value={verbText} onChange={(event) => setVerbText(event.target.value)} onBlur={() => void commitVerbVocabulary()} spellCheck={false} /><div><button className="secondary" onClick={resetVerbVocabulary}>reset vocabulary</button><button className="primary" onClick={() => void commitVerbVocabulary()}>save vocabulary</button></div></div> : <div className="hot-word-settings"><p>One word or phrase per line. Dummyplug checks selected-asset metadata and the simple prompt against the final generated prompt.</p><p>This private list stays in this browser. It is never sent to either provider or written into a sealed job ZIP.</p><textarea value={hotWordText} onChange={(event) => setHotWordText(event.target.value)} placeholder="one carry-through term per line" spellCheck={false} /><div><span>{hotWords.length} Hot Word{hotWords.length === 1 ? "" : "s"}</span><button className="primary" onClick={() => setMessage(`${hotWords.length} Hot Word${hotWords.length === 1 ? "" : "s"} saved in this browser.`)}>save hot words</button></div></div>}
       </section></div>}
     </main>
   );
