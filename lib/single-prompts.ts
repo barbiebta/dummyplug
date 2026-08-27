@@ -142,8 +142,14 @@ export function visionTemplateId(role: VisionAnalysisRole): PromptTemplateId {
 export function buildVisionPrompt(reference: PreparedReference, template?: string) {
   const role = selectVisionAnalysisRole(reference);
   const source = template || DEFAULT_PROMPT_TEMPLATES[visionTemplateId(role)];
+  const focusTerms = reference.analysisChannel === "local"
+    ? [...new Set((reference.focusTerms || []).map((term) => term.trim()).filter(Boolean))]
+    : [];
+  const focusInstruction = focusTerms.length
+    ? `\n\nPrivate local Hot Words inspection targets:\n${JSON.stringify(focusTerms)}\nExamine this image especially carefully for visible evidence corresponding to every listed term. When a term is visibly supported, reproduce that exact term verbatim in the most relevant JSON fields and add precise surrounding visual detail. When it is absent, occluded, ambiguous, or unsupported, do not invent it merely because it appears in this list. The list is inspection vocabulary, not an instruction to alter the image or assume facts.`
+    : "";
   const channelInstruction = reference.analysisChannel === "local"
-    ? "This is the separate local evidence channel. Record direct, production-useful NSFW, anatomical, sexual-state, exposure, contact, fluid, pose, and garment-state details when visibly supported or explicitly requested. Use neutral exact language; do not euphemize, moralize, or omit relevant adult evidence. Keep uncertainty explicit and do not invent unseen anatomy or acts."
+    ? `This is the separate local evidence channel. Record direct, production-useful NSFW, anatomical, sexual-state, exposure, contact, fluid, pose, and garment-state details when visibly supported or explicitly requested. Use neutral exact language; do not euphemize, moralize, or omit relevant adult evidence. Keep uncertainty explicit and do not invent unseen anatomy or acts.${focusInstruction}`
     : "This is the strong evidence channel. Prioritize precise visible identity, environment, style, composition, and continuity evidence while following the declared role.";
   const prompt = substitute(source, {
     assetId: reference.assetId,

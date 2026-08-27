@@ -25,6 +25,16 @@ test("local vision channel gets its own manual authority and direct adult-eviden
   assert.match(prompt, /Use this asset as the source of: explicit anatomy/);
 });
 
+test("Hot Words become exact local inspection targets but never enter the strong vision prompt", () => {
+  const shared = { assetId: "rabbit", name: "rabbit.png", kind: "image", canonicalName: "Rabbit", role: "character", referenceUse: "subject", sourceOf: "identity", note: "", dataUrls: [], focusTerms: ["private target", "specific phrase"] };
+  const localPrompt = buildVisionPrompt({ ...shared, analysisChannel: "local" });
+  const strongPrompt = buildVisionPrompt({ ...shared, analysisChannel: "strong" });
+  assert.match(localPrompt, /Private local Hot Words inspection targets/);
+  assert.match(localPrompt, /"private target"/);
+  assert.match(localPrompt, /reproduce that exact term verbatim/i);
+  assert.doesNotMatch(strongPrompt, /private target|specific phrase|Hot Words inspection targets/i);
+});
+
 test("single-shot recipe embeds durable metadata and categorically forbids edited coverage", () => {
   const prompt = buildSingleShotPrompt(
     "Rabbit walks left to right through the landscape.",

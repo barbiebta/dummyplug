@@ -103,6 +103,8 @@ export interface AssetAnalysis {
 export interface PreparedReference {
   assetId: string;
   analysisChannel?: "strong" | "local";
+  /** Private local-analysis inspection targets; never supplied to the strong channel. */
+  focusTerms?: string[];
   name: string;
   kind: AssetKind;
   canonicalName: string;
