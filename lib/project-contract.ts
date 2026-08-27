@@ -93,6 +93,7 @@ export interface ProjectAssetSidecar {
   dummyplug?: { assetId?: string; relativePath?: string; importedAt?: string };
   metadata?: Record<string, unknown>;
   analysis?: Record<string, unknown>;
+  localAnalysis?: Record<string, unknown>;
   updatedAt: string;
   provider?: Record<string, unknown>;
   [key: string]: unknown;
@@ -117,8 +118,11 @@ export interface ProjectAsset {
   referenceUse: ReferenceUse;
   sourceOf: string;
   note: string;
+  localSourceOf: string;
+  localNote: string;
   metadata: ProjectAssetMetadata;
   analysis?: Record<string, unknown>;
+  localAnalysis?: Record<string, unknown>;
   sidecarPath: string;
 }
 
@@ -128,6 +132,8 @@ export interface ProjectAssetMetadata {
   referenceUse: ReferenceUse;
   sourceOf: string;
   note: string;
+  localSourceOf: string;
+  localNote: string;
   [key: string]: unknown;
 }
 

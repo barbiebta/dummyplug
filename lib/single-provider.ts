@@ -4,7 +4,7 @@ import type { AssetAnalysis, AttachmentSpec, ModelSettings, PreparedReference, S
 
 export const runtime = "edge";
 
-type AssetCatalogItem = { id: string; name: string; kind: string; canonicalName: string; role: string; referenceUse: string; sourceOf: string; note: string };
+type AssetCatalogItem = { id: string; name: string; kind: string; canonicalName: string; role: string; referenceUse: string; sourceOf: string; note: string; localSourceOf?: string; localNote?: string };
 type ProviderRequest =
   | { action: "test"; settings: ModelSettings; promptTemplates?: Partial<PromptTemplateMap> }
   | { action: "analyze"; settings: ModelSettings; references: PreparedReference[]; promptTemplates?: Partial<PromptTemplateMap> }
@@ -89,6 +89,7 @@ function strings(value: unknown) {
 function normalizeAnalysis(candidate: Partial<AssetAnalysis>, reference: PreparedReference): AssetAnalysis {
   return {
     assetId: reference.assetId,
+    channel: reference.analysisChannel || "strong",
     analysisRole: selectVisionAnalysisRole(reference),
     summary: String(candidate.summary || `${reference.name}, analyzed by the selected vision model.`),
     subjects: strings(candidate.subjects),

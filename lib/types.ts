@@ -27,6 +27,11 @@ export interface ModelSettings {
   promptMaxTokens: number;
 }
 
+export interface ProviderProfiles {
+  strong: ModelSettings;
+  local: ModelSettings;
+}
+
 export interface AssetRecord {
   id: string;
   name: string;
@@ -51,7 +56,10 @@ export interface AssetRecord {
   referenceUse: ReferenceUse;
   sourceOf: string;
   note: string;
+  localSourceOf?: string;
+  localNote?: string;
   analysis?: AssetAnalysis;
+  localAnalysis?: AssetAnalysis;
   missingFile?: boolean;
 }
 
@@ -78,6 +86,8 @@ export interface JobSettings {
 
 export interface AssetAnalysis {
   assetId: string;
+  /** Identifies which durable evidence channel produced this record. */
+  channel?: "strong" | "local";
   analysisRole?: "character" | "setting" | "style" | "general";
   summary: string;
   subjects: string[];
@@ -92,6 +102,7 @@ export interface AssetAnalysis {
 
 export interface PreparedReference {
   assetId: string;
+  analysisChannel?: "strong" | "local";
   name: string;
   kind: AssetKind;
   canonicalName: string;

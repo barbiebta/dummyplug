@@ -289,7 +289,8 @@ export class ProjectLibrary {
       importedAt: input.importedAt || now(),
       source: { ...oldSource, name: path.posix.basename(relativePath), size: input.size, mimeType: input.mimeType, lastModified: input.lastModified, ...(input.sha256 ? { sha256: input.sha256 } : {}) },
       ...(isRecord(existing.analysis) && !bytesChanged ? { analysis: { ...existing.analysis, assetId } } : {}),
-      ...(bytesChanged ? { analysis: undefined } : {}),
+      ...(isRecord(existing.localAnalysis) && !bytesChanged ? { localAnalysis: { ...existing.localAnalysis, assetId } } : {}),
+      ...(bytesChanged ? { analysis: undefined, localAnalysis: undefined } : {}),
       updatedAt: now(),
     };
     await this.writeJson(sidecarPath, sidecar);
@@ -338,6 +339,8 @@ export class ProjectLibrary {
       referenceUse: VALID_REFERENCE_USES.has(String(rawMetadata.referenceUse)) ? String(rawMetadata.referenceUse) as ProjectAssetMetadata["referenceUse"] : "subject",
       sourceOf: typeof rawMetadata.sourceOf === "string" ? rawMetadata.sourceOf : "",
       note: typeof rawMetadata.note === "string" ? rawMetadata.note : "",
+      localSourceOf: typeof rawMetadata.localSourceOf === "string" ? rawMetadata.localSourceOf : "",
+      localNote: typeof rawMetadata.localNote === "string" ? rawMetadata.localNote : "",
     };
     return {
       id: typeof sidecar.assetId === "string" ? sidecar.assetId : typeof nested.assetId === "string" ? nested.assetId : randomUUID(),
@@ -352,8 +355,10 @@ export class ProjectLibrary {
       ...(typeof source.duration === "number" ? { sourceDuration: source.duration } : {}),
       ...(typeof source.sha256 === "string" ? { sha256: source.sha256 } : {}),
       canonicalName: metadata.canonicalName, role: metadata.role, referenceUse: metadata.referenceUse, sourceOf: metadata.sourceOf, note: metadata.note,
+      localSourceOf: metadata.localSourceOf, localNote: metadata.localNote,
       metadata,
       analysis: isRecord(sidecar.analysis) ? sidecar.analysis : undefined,
+      localAnalysis: isRecord(sidecar.localAnalysis) ? sidecar.localAnalysis : undefined,
       sidecarPath: projectSidecarPath(relativePath),
     };
   }
@@ -460,6 +465,7 @@ export class ProjectLibrary {
   async updateAssetMetadata(projectId: string, relativePath: string, changes: {
     metadata?: Partial<ProjectAssetMetadata>;
     analysis?: Record<string, unknown> | undefined;
+    localAnalysis?: Record<string, unknown> | undefined;
     sourceFacts?: Record<string, unknown>;
   }) {
     const source = await this.existingAssetPath(projectId, relativePath);
@@ -476,7 +482,7 @@ export class ProjectLibrary {
       mimeType: typeof nextSource.mimeType === "string" ? nextSource.mimeType : mimeFromName(source.safeRelativePath),
       size: stats.size,
       lastModified: Number(nextSource.lastModified || stats.mtimeMs),
-      existing: { ...current, metadata: nextMetadata, ...(changes.analysis === undefined ? {} : { analysis: changes.analysis }), source: nextSource },
+      existing: { ...current, metadata: nextMetadata, ...(changes.analysis === undefined ? {} : { analysis: changes.analysis }), ...(changes.localAnalysis === undefined ? {} : { localAnalysis: changes.localAnalysis }), source: nextSource },
     });
     return this.toAsset(source.safeRelativePath, stats, sidecar);
   }

@@ -23,13 +23,14 @@ test("creates, lists, and persists a project and its settings", async () => with
 
 test("imports bytes into preserved folders, writes exact sidecars, and avoids destructive conflicts", async () => withLibrary(async (library, root) => {
   const project = await library.createProject("film test");
-  const first = await library.importAsset(project.id, { relativePath: "characters/rabbit.png", bytes: new TextEncoder().encode("rabbit"), sidecar: { schema: "dummyplug.asset.v4", assetId: "old-browser-id", metadata: { canonicalName: "Rabbit" }, analysis: { assetId: "old-browser-id", summary: "Rabbit" } } });
+  const first = await library.importAsset(project.id, { relativePath: "characters/rabbit.png", bytes: new TextEncoder().encode("rabbit"), sidecar: { schema: "dummyplug.asset.v4", assetId: "old-browser-id", metadata: { canonicalName: "Rabbit" }, analysis: { assetId: "old-browser-id", summary: "Rabbit" }, localAnalysis: { assetId: "old-browser-id", summary: "Local Rabbit" } } });
   const second = await library.importAsset(project.id, { relativePath: "characters/rabbit.png", bytes: new TextEncoder().encode("rabbit 2") });
   assert.equal(first.relativePath, "characters/rabbit.png");
   assert.equal(second.relativePath, "characters/rabbit (2).png");
   assert.equal(second.conflictRenamed, true);
   assert.notEqual(first.id, "old-browser-id");
   assert.equal(first.analysis?.assetId, first.id);
+  assert.equal(first.localAnalysis?.assetId, first.id);
   const sidecar = path.join(root, "film test", "assets", "characters", "rabbit.png.dummyplug.json");
   const sidecarText = await (await import("node:fs/promises")).readFile(sidecar, "utf8");
   assert.match(sidecarText, /dummyplug/);
@@ -71,13 +72,16 @@ test("manual and vision metadata updates rewrite the v4 companion without changi
   const project = await library.createProject("metadata test");
   const imported = await library.importAsset(project.id, { relativePath: "rabbit.png", bytes: Buffer.from("rabbit") });
   const updated = await library.updateAssetMetadata(project.id, imported.relativePath, {
-    metadata: { canonicalName: "Rabbit", role: "character", note: "drunk and happy" },
+    metadata: { canonicalName: "Rabbit", role: "character", note: "drunk and happy", localSourceOf: "explicit anatomy", localNote: "local-only instruction" },
     analysis: { assetId: imported.id, summary: "A very specific rabbit." },
+    localAnalysis: { assetId: imported.id, summary: "A direct local description." },
     sourceFacts: { width: 768, height: 1344 },
   });
   assert.equal(updated.id, imported.id);
   assert.equal(updated.canonicalName, "Rabbit");
   assert.equal(updated.analysis?.summary, "A very specific rabbit.");
+  assert.equal(updated.localAnalysis?.summary, "A direct local description.");
+  assert.equal(updated.localSourceOf, "explicit anatomy");
   const sidecar = JSON.parse(await (await import("node:fs/promises")).readFile(path.join(root, "metadata test", "assets", "rabbit.png.dummyplug.json"), "utf8"));
   assert.equal(sidecar.schema, "dummyplug.asset.v4");
   assert.equal(sidecar.assetId, imported.id);
@@ -87,6 +91,7 @@ test("manual and vision metadata updates rewrite the v4 companion without changi
   const [changed] = await library.recrawl(project.id);
   assert.equal(changed.id, imported.id);
   assert.equal(changed.analysis, undefined);
+  assert.equal(changed.localAnalysis, undefined);
 }));
 
 test("draft state persists while path traversal and symlink-like paths are rejected", async () => withLibrary(async (library) => {

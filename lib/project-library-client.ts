@@ -64,7 +64,7 @@ export function projectAssetUrl(projectId: string, relativePath: string) {
   return `${BASE}/asset${query({ projectId, path: relativePath })}`;
 }
 
-export async function updateProjectAsset(projectId: string, relativePath: string, changes: { metadata?: Record<string, unknown>; analysis?: Record<string, unknown>; sourceFacts?: Record<string, unknown> }) {
+export async function updateProjectAsset(projectId: string, relativePath: string, changes: { metadata?: Record<string, unknown>; analysis?: Record<string, unknown>; localAnalysis?: Record<string, unknown>; sourceFacts?: Record<string, unknown> }) {
   return (await request<{ asset: ProjectAsset }>(`/metadata${query({ projectId, path: relativePath })}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) })).asset;
 }
 

@@ -30,6 +30,22 @@ test("vision analysis uses the role-routed recipe and expanded allowance", async
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("local vision analysis preserves its channel through the provider response", async () => {
+  const originalFetch = globalThis.fetch;
+  let observed;
+  globalThis.fetch = async (_url, init) => {
+    observed = JSON.parse(String(init?.body));
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ summary: "Direct local evidence.", subjects: ["Rabbit"], continuityLocks: ["body state"] }) } }] });
+  };
+  try {
+    const response = await POST(new Request("http://localhost/api/provider", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "analyze", settings: { ...settings, provider: "local", baseUrl: "http://127.0.0.1:8080", visionModel: "local-vision" }, references: [{ assetId: "rabbit", analysisChannel: "local", name: "rabbit.png", kind: "image", canonicalName: "Rabbit", role: "character", referenceUse: "subject", sourceOf: "explicit anatomy", note: "local note", dataUrls: [] }] }) }));
+    assert.equal(response.status, 200);
+    assert.match(observed.messages[0].content[0].text, /Analysis channel: local/);
+    assert.match(observed.messages[0].content[0].text, /do not euphemize, moralize, or omit/i);
+    assert.equal((await response.json()).analyses[0].channel, "local");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("single-shot expansion uses the prompt model and one-take recipe", async () => {
   const originalFetch = globalThis.fetch;
   let observed;

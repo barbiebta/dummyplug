@@ -17,7 +17,7 @@ import { createProject, createProjectFolder, importProjectAsset, listProjects, l
 import { makeReferenceSidecar, readReferenceSidecar, sidecarMatchKey, sidecarName } from "../../lib/reference-sidecar";
 import { compileAttachments, makeDemoAnalysis, validateSingleShotPrompt } from "../../lib/single-h3";
 import { DEFAULT_PROMPT_TEMPLATES, EXPOSED_PROMPT_TEMPLATES, type PromptTemplateId, type PromptTemplateMap } from "../../lib/single-prompts";
-import type { AssetKind, AssetRecord, AssetRole, JobSettings, ModelSettings, PreparedReference, ReferenceUse } from "../../lib/types";
+import type { AssetAnalysis, AssetKind, AssetRecord, AssetRole, JobSettings, ModelSettings, PreparedReference, ReferenceUse } from "../../lib/types";
 
 const DEFAULT_SETTINGS: ModelSettings = {
   provider: "openrouter",
@@ -28,6 +28,17 @@ const DEFAULT_SETTINGS: ModelSettings = {
   rememberKey: false,
   temperature: 0.2,
   promptMaxTokens: 32_768,
+};
+
+const DEFAULT_LOCAL_SETTINGS: ModelSettings = {
+  provider: "local",
+  visionModel: "",
+  promptModel: "",
+  baseUrl: "http://127.0.0.1:8080",
+  apiKey: "",
+  rememberKey: false,
+  temperature: 0.2,
+  promptMaxTokens: 8_192,
 };
 
 const ROLE_OPTIONS: Array<{ value: AssetRole; label: string }> = [
@@ -133,7 +144,10 @@ function projectAssetRecord(projectId: string, asset: ProjectAsset, selectedIds:
     referenceUse: asset.referenceUse,
     sourceOf: asset.sourceOf,
     note: asset.note,
+    localSourceOf: asset.localSourceOf || "",
+    localNote: asset.localNote || "",
     analysis: asset.analysis as AssetRecord["analysis"],
+    localAnalysis: asset.localAnalysis as AssetRecord["localAnalysis"],
     missingFile: false,
   };
 }
@@ -149,6 +163,16 @@ function parseVerbVocabulary(text: string) {
     const cleanForms = forms?.split(",").map((form) => form.trim().toLocaleLowerCase()).filter(Boolean) || [];
     return cleanLemma && cleanForms.length ? { lemma: cleanLemma, forms: [...new Set(cleanForms)] } : null;
   }).filter((family): family is VerbFamily => Boolean(family) && family!.lemma !== "be");
+}
+
+function VisionRecord({ analysis, channel }: { analysis?: AssetAnalysis; channel: "strong" | "local" }) {
+  if (!analysis) return <div className="vision-empty compact"><span>{channel} analysis not run</span><p>{channel === "local" ? "Local evidence stays separate and can record direct anatomical or NSFW detail." : "Strong evidence records precise visible identity, setting, style, and continuity detail."}</p></div>;
+  return <div className={`vision-record vision-record-${channel}`}><div className="vision-head"><strong>{channel} vision record</strong><span>{analysis.analysisRole || "general"}</span></div><section><h3>summary</h3><p>{analysis.summary}</p></section><details open><summary>subjects</summary>{analysis.subjects.map((item) => <p key={item}>{item}</p>)}</details><details><summary>setting</summary><p>{analysis.setting}</p></details><details><summary>style</summary><p>{analysis.style}</p></details><details><summary>composition</summary><p>{analysis.composition}</p></details><details><summary>motion</summary><p>{analysis.motion}</p></details><details><summary>continuity locks</summary><ul>{analysis.continuityLocks.map((item) => <li key={item}>{item}</li>)}</ul></details></div>;
+}
+
+function ConnectionEditor({ channel, value, status, busy, onChange, onTest }: { channel: "strong" | "local"; value: ModelSettings; status: "unknown" | "connected" | "failed"; busy: boolean; onChange(value: ModelSettings): void; onTest(): void }) {
+  const patch = (changes: Partial<ModelSettings>) => onChange({ ...value, ...changes });
+  return <fieldset className={`connection-profile connection-profile-${channel}`}><legend><i className={`provider-dot ${status}`} aria-hidden="true" />{channel}</legend><p>{channel === "strong" ? "precise vision analysis and final prompt writing" : "a separate analysis channel for local or less-restricted tagging"}</p><label className="field"><span>provider</span><select value={value.provider} onChange={(event) => patch({ provider: event.target.value as ModelSettings["provider"] })}><option value="demo">offline demo</option><option value="openrouter">OpenRouter</option><option value="local">local OpenAI-compatible server</option></select></label>{value.provider === "local" && <label className="field"><span>server address</span><input value={value.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} /></label>}<label className="field"><span>vision model</span><input disabled={value.provider === "demo"} value={value.visionModel} onChange={(event) => patch({ visionModel: event.target.value })} placeholder={channel === "local" ? "local vision model id" : undefined} /></label>{channel === "strong" && <><label className="field"><span>prompt model</span><input disabled={value.provider === "demo"} value={value.promptModel} onChange={(event) => patch({ promptModel: event.target.value })} /></label><label className="field"><span>prompt output tokens</span><input type="number" min={8192} max={32768} step={4096} disabled={value.provider === "demo"} value={value.promptMaxTokens} onChange={(event) => patch({ promptMaxTokens: Math.max(8192, Math.min(32768, Number(event.target.value) || 32768)) })} /></label></>}{value.provider !== "demo" && <><label className="field"><span>api key</span><input type="password" value={value.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} autoComplete="off" /></label><label className="check-field"><input type="checkbox" checked={value.rememberKey} onChange={(event) => patch({ rememberKey: event.target.checked })} /><span>remember key in this browser profile</span></label></>}<label className="field"><span>temperature <output>{value.temperature.toFixed(1)}</output></span><input type="range" min="0" max="1" step="0.1" disabled={value.provider === "demo"} value={value.temperature} onChange={(event) => patch({ temperature: Number(event.target.value) })} /></label><button className="secondary connection-test" disabled={busy || (value.provider !== "demo" && !value.visionModel.trim())} onClick={onTest}>{busy ? `testing ${channel}…` : `test ${channel}`}</button></fieldset>;
 }
 
 function fileToDataUrl(file: Blob) {
@@ -242,18 +266,20 @@ export function SingleShotApp() {
   const [generatedPrompt, setGeneratedPrompt] = useState("");
   const [promptHistory, setPromptHistory] = useState<string[]>([]);
   const [settings, setSettings] = useState<ModelSettings>(DEFAULT_SETTINGS);
+  const [localSettings, setLocalSettings] = useState<ModelSettings>(DEFAULT_LOCAL_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPage, setSettingsPage] = useState<"connection" | "prompts" | "naming">("connection");
   const [promptOverrides, setPromptOverrides] = useState<Partial<PromptTemplateMap>>({});
   const [copiedPromptId, setCopiedPromptId] = useState<string | null>(null);
   const [storageReady, setStorageReady] = useState(false);
-  const [busy, setBusy] = useState<"analyze" | "generate" | "export" | "test" | null>(null);
+  const [busy, setBusy] = useState<"analyze-strong" | "analyze-local" | "generate" | "export" | "test-strong" | "test-local" | null>(null);
   const [message, setMessage] = useState("Choose a project, import assets, and assemble a job.");
   const [dragging, setDragging] = useState(false);
   const [assetFilterKind, setAssetFilterKind] = useState<"all" | AssetKind>("all");
   const [assetFilterText, setAssetFilterText] = useState("");
   const [sealFeedback, setSealFeedback] = useState("");
   const [providerStatus, setProviderStatus] = useState<"unknown" | "connected" | "failed">("unknown");
+  const [localProviderStatus, setLocalProviderStatus] = useState<"unknown" | "connected" | "failed">("unknown");
   const [projects, setProjects] = useState<ProjectManifest[]>([]);
   const [activeProject, setActiveProject] = useState<ProjectManifest | null>(null);
   const [draftReadyProjectId, setDraftReadyProjectId] = useState("");
@@ -281,7 +307,9 @@ export function SingleShotApp() {
     let canceled = false;
     void (async () => {
       const rawSettings = localStorage.getItem("dummyplug.single.settings.v2");
+      const rawLocalSettings = localStorage.getItem("dummyplug.single.localSettings.v1");
       const sessionKey = sessionStorage.getItem("dummyplug.single.v2.apiKey") || "";
+      const localSessionKey = sessionStorage.getItem("dummyplug.single.v1.localApiKey") || "";
       const rawPrompts = localStorage.getItem("dummyplug.singlePromptOverrides.v2");
       if (rawSettings) {
         try {
@@ -298,6 +326,22 @@ export function SingleShotApp() {
             promptMaxTokens: Number(saved.promptMaxTokens || DEFAULT_SETTINGS.promptMaxTokens),
           });
         } catch { /* ignore stale settings */ }
+      }
+      if (rawLocalSettings) {
+        try {
+          const saved = JSON.parse(rawLocalSettings) as Record<string, unknown>;
+          setLocalSettings({
+            ...DEFAULT_LOCAL_SETTINGS,
+            provider: (saved.provider || DEFAULT_LOCAL_SETTINGS.provider) as ModelSettings["provider"],
+            visionModel: String(saved.visionModel ?? DEFAULT_LOCAL_SETTINGS.visionModel),
+            promptModel: "",
+            baseUrl: String(saved.baseUrl || DEFAULT_LOCAL_SETTINGS.baseUrl),
+            apiKey: saved.rememberKey ? String(saved.apiKey || "") : localSessionKey,
+            rememberKey: Boolean(saved.rememberKey),
+            temperature: Number(saved.temperature ?? DEFAULT_LOCAL_SETTINGS.temperature),
+            promptMaxTokens: 8_192,
+          });
+        } catch { /* ignore stale local settings */ }
       }
       if (rawPrompts) {
         try { setPromptOverrides(JSON.parse(rawPrompts) as Partial<PromptTemplateMap>); } catch { /* ignore stale prompt edits */ }
@@ -334,6 +378,9 @@ export function SingleShotApp() {
             mimeType: file?.type || record.mimeType,
             previewUrl: file ? URL.createObjectURL(file) : "",
             analysis: changed ? undefined : record.analysis,
+            localSourceOf: record.localSourceOf || "",
+            localNote: record.localNote || "",
+            localAnalysis: changed ? undefined : record.localAnalysis,
             missingFile: !file,
           });
         }
@@ -358,6 +405,14 @@ export function SingleShotApp() {
     if (settings.rememberKey) sessionStorage.removeItem("dummyplug.single.v2.apiKey");
     else sessionStorage.setItem("dummyplug.single.v2.apiKey", settings.apiKey);
   }, [settings, storageReady]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    const stored = { ...localSettings, apiKey: localSettings.rememberKey ? localSettings.apiKey : "" };
+    localStorage.setItem("dummyplug.single.localSettings.v1", JSON.stringify(stored));
+    if (localSettings.rememberKey) sessionStorage.removeItem("dummyplug.single.v1.localApiKey");
+    else sessionStorage.setItem("dummyplug.single.v1.localApiKey", localSettings.apiKey);
+  }, [localSettings, storageReady]);
 
   useEffect(() => {
     if (!storageReady) return;
@@ -394,15 +449,20 @@ export function SingleShotApp() {
   }, [settings.apiKey, settings.baseUrl, settings.provider, settings.promptModel, settings.visionModel]);
 
   useEffect(() => {
+    const timer = window.setTimeout(() => setLocalProviderStatus(localSettings.provider === "demo" ? "connected" : "unknown"), 0);
+    return () => window.clearTimeout(timer);
+  }, [localSettings.apiKey, localSettings.baseUrl, localSettings.provider, localSettings.visionModel]);
+
+  useEffect(() => {
     if (!storageReady) return;
-    const probe = () => { if (document.visibilityState === "visible") void testProvider(true); };
+    const probe = () => { if (document.visibilityState === "visible") void (async () => { await testProvider("strong", true); await testProvider("local", true); })(); };
     window.addEventListener("focus", probe);
     document.addEventListener("visibilitychange", probe);
     const timer = window.setTimeout(probe, 600);
     return () => { window.clearTimeout(timer); window.removeEventListener("focus", probe); document.removeEventListener("visibilitychange", probe); };
   // Connection inputs intentionally re-register the focus probe.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.apiKey, settings.baseUrl, settings.provider, storageReady]);
+  }, [localSettings.apiKey, localSettings.baseUrl, localSettings.provider, settings.apiKey, settings.baseUrl, settings.provider, storageReady]);
 
   useEffect(() => {
     if (!storageReady || activeProject) return;
@@ -494,7 +554,7 @@ export function SingleShotApp() {
         if (!file && item.sourceHandle) try { file = await item.sourceHandle.getFile(); } catch { /* report missing below */ }
         if (!file) throw new Error(`${item.record.name}: the legacy source could not be reopened.`);
         const record = { ...item.record, previewUrl: "" } as AssetRecord;
-        const sidecar = makeReferenceSidecar(record, settings, new Date().toISOString(), { relativePath: item.record.name, importedAt: item.record.importedAt });
+        const sidecar = makeReferenceSidecar({ ...record, localSourceOf: record.localSourceOf || "", localNote: record.localNote || "" }, { strong: settings, local: localSettings }, new Date().toISOString(), { relativePath: item.record.name, importedAt: item.record.importedAt });
         await importProjectAsset(created.project.id, file, item.record.name, JSON.stringify(sidecar));
       }
       setProjects((current) => [created.project, ...current]);
@@ -589,13 +649,13 @@ export function SingleShotApp() {
   useEffect(() => { if (selectedAsset) void hydrateAssetSource(selectedAsset); }, [selectedAsset?.id, selectedAsset?.sourceDuration, selectedAsset?.sourceWidth]);
   const compiled = useMemo(() => compileAttachments(chosenAssets), [chosenAssets]);
   const validation = generatedPrompt ? validateSingleShotPrompt(generatedPrompt, compiled.attachments, compiled.subjects) : null;
-  const analyzedCount = assets.filter((asset) => asset.analysis).length;
+  const analyzedCount = assets.filter((asset) => asset.analysis || asset.localAnalysis).length;
   const resolvedJobDescPreview = deriveJobDesc(simplePrompt, chosenAssets, jobDesc, verbFamilies);
   const visibleAssets = assets.filter((asset) => {
     if (assetFilterKind !== "all" && asset.kind !== assetFilterKind) return false;
     const query = assetFilterText.trim().toLocaleLowerCase();
     if (!query) return true;
-    return [asset.name, asset.canonicalName, asset.role, asset.referenceUse, asset.sourceOf, asset.note, asset.analysis ? JSON.stringify(asset.analysis) : ""].filter(Boolean).join(" ").toLocaleLowerCase().includes(query);
+    return [asset.name, asset.canonicalName, asset.role, asset.referenceUse, asset.sourceOf, asset.note, asset.localSourceOf, asset.localNote, asset.analysis ? JSON.stringify(asset.analysis) : "", asset.localAnalysis ? JSON.stringify(asset.localAnalysis) : ""].filter(Boolean).join(" ").toLocaleLowerCase().includes(query);
   });
   const sealIssues = [
     ...(!generatedPrompt.trim() ? ["Write or generate the six-part prompt."] : validation && !validation.valid ? ["The six-part prompt does not validate against the current selected references."] : []),
@@ -605,18 +665,21 @@ export function SingleShotApp() {
     ...chosenAssets.filter((asset) => asset.missingFile).map((asset) => `${asset.name}: reload the source file.`),
   ];
 
-  async function postProvider(body: Record<string, unknown>) {
-    if (settings.provider === "openrouter" && !settings.apiKey.trim()) {
-      throw new ProviderRequestError("Open settings and enter your OpenRouter API key.", {});
+  async function postProvider(body: Record<string, unknown>, channel: "strong" | "local" = "strong") {
+    const connection = channel === "local" ? localSettings : settings;
+    const setConnectionStatus = channel === "local" ? setLocalProviderStatus : setProviderStatus;
+    if (connection.provider === "openrouter" && !connection.apiKey.trim()) {
+      throw new ProviderRequestError(`Open settings and enter the ${channel} OpenRouter API key.`, {});
     }
+    if (body.action === "expand-single" ? !connection.promptModel.trim() : !connection.visionModel.trim()) throw new ProviderRequestError(`Choose the ${channel} ${body.action === "expand-single" ? "prompt" : "vision"} model in settings.`, {});
     const controller = new AbortController();
     activeController.current = controller;
-    const endpoint = settings.provider === "demo" ? "/api/provider" : "/provider-bridge";
+    const endpoint = connection.provider === "demo" ? "/api/provider" : "/provider-bridge";
     try {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...body, settings, ...(Object.keys(promptOverrides).length ? { promptTemplates: promptOverrides } : {}) }),
+        body: JSON.stringify({ ...body, settings: connection, ...(Object.keys(promptOverrides).length ? { promptTemplates: promptOverrides } : {}) }),
         signal: controller.signal,
       });
       const text = await response.text();
@@ -624,10 +687,10 @@ export function SingleShotApp() {
       try { payload = JSON.parse(text) as Record<string, unknown>; }
       catch { payload = { error: text.trim().slice(0, 700) || `Provider returned ${response.status} without JSON.` }; }
       if (!response.ok) throw new ProviderRequestError(String(payload.error || "Provider request failed."), payload);
-      setProviderStatus("connected");
+      setConnectionStatus("connected");
       return payload;
     } catch (error) {
-      setProviderStatus("failed");
+      setConnectionStatus("failed");
       if (controller.signal.aborted) throw new ProviderRequestError("Request canceled.", { canceled: true });
       throw error;
     } finally {
@@ -647,7 +710,7 @@ export function SingleShotApp() {
     const destination = directory || binding?.directory || metadataDirectoryStore.current;
     if (!destination) return false;
     if (!await requestDirectoryAccess(destination)) return false;
-    const sidecar = makeReferenceSidecar(asset, settings);
+    const sidecar = makeReferenceSidecar(asset, { strong: settings, local: localSettings });
     if (!sidecar) return false;
     const handle = await destination.getFileHandle(sidecarName(binding?.sourceName || asset.name), { create: true });
     const writable = await handle.createWritable();
@@ -734,7 +797,10 @@ export function SingleShotApp() {
         referenceUse: imported?.referenceUse ?? reusable?.referenceUse ?? defaultReferenceUse(kind),
         sourceOf: imported?.sourceOf ?? reusable?.sourceOf ?? "",
         note: imported?.note ?? reusable?.note ?? "",
+        localSourceOf: imported?.localSourceOf ?? reusable?.localSourceOf ?? "",
+        localNote: imported?.localNote ?? reusable?.localNote ?? "",
         analysis: imported?.analysis ?? (changed ? undefined : reusable?.analysis),
+        localAnalysis: imported?.localAnalysis ?? (changed ? undefined : reusable?.localAnalysis),
         missingFile: false,
       });
     }
@@ -796,7 +862,7 @@ export function SingleShotApp() {
     if (!current) return;
     try {
       if (activeProject && current.relativePath) {
-        await updateProjectAsset(activeProject.id, current.relativePath, { metadata: { canonicalName: current.canonicalName, role: current.role, referenceUse: current.referenceUse, sourceOf: current.sourceOf, note: current.note, trimStart: current.trimStart, trimEnd: current.trimEnd, width: current.sourceWidth, height: current.sourceHeight, duration: current.sourceDuration } });
+        await updateProjectAsset(activeProject.id, current.relativePath, { metadata: { canonicalName: current.canonicalName, role: current.role, referenceUse: current.referenceUse, sourceOf: current.sourceOf, note: current.note, localSourceOf: current.localSourceOf, localNote: current.localNote, trimStart: current.trimStart, trimEnd: current.trimEnd, width: current.sourceWidth, height: current.sourceHeight, duration: current.sourceDuration } });
         setMessage(`${sidecarName(current.name)} saved in ${activeProject.name}.`);
         return;
       }
@@ -806,7 +872,7 @@ export function SingleShotApp() {
   }
 
   function downloadSidecar(asset: AssetRecord) {
-    const sidecar = makeReferenceSidecar(asset, settings);
+    const sidecar = makeReferenceSidecar(asset, { strong: settings, local: localSettings });
     if (!sidecar) return;
     const url = URL.createObjectURL(new Blob([JSON.stringify(sidecar, null, 2)], { type: "application/json" }));
     const anchor = document.createElement("a");
@@ -837,27 +903,30 @@ export function SingleShotApp() {
     if (selectedAssetId === id) setSelectedAssetId(assets.find((asset) => asset.id !== id)?.id || "");
   }
 
-  async function analyzeSelected() {
+  async function analyzeSelected(channel: "strong" | "local" = "strong") {
     if (!selectedAsset) return setMessage("Select an asset first.");
-    setBusy("analyze");
-    setMessage(`Analyzing ${selectedAsset.name} as ${selectedAsset.role}…`);
+    const connection = channel === "local" ? localSettings : settings;
+    setBusy(channel === "local" ? "analyze-local" : "analyze-strong");
+    setMessage(`${channel === "local" ? "Locally analyzing" : "Analyzing"} ${selectedAsset.name} as ${selectedAsset.role}…`);
     try {
       const file = await ensureAssetFile(selectedAsset);
       let analysis: AssetRecord["analysis"];
-      if (settings.provider === "demo") analysis = makeDemoAnalysis(selectedAsset);
+      if (connection.provider === "demo") analysis = { ...makeDemoAnalysis(channel === "local" ? { ...selectedAsset, sourceOf: selectedAsset.localSourceOf || "", note: selectedAsset.localNote || "" } : selectedAsset), channel };
       else {
         const dataUrls = selectedAsset.kind === "image" ? [await resizeImage(file)] : selectedAsset.kind === "video" ? await sampleVideo(file) : [];
-        const reference: PreparedReference = { assetId: selectedAsset.id, name: selectedAsset.name, kind: selectedAsset.kind, canonicalName: selectedAsset.canonicalName, role: selectedAsset.role, referenceUse: selectedAsset.referenceUse, sourceOf: selectedAsset.sourceOf, note: selectedAsset.note, dataUrls };
-        const payload = await postProvider({ action: "analyze", references: [reference] });
-        analysis = (payload.analyses as AssetRecord["analysis"][])?.[0];
+        const reference: PreparedReference = { assetId: selectedAsset.id, analysisChannel: channel, name: selectedAsset.name, kind: selectedAsset.kind, canonicalName: selectedAsset.canonicalName, role: selectedAsset.role, referenceUse: selectedAsset.referenceUse, sourceOf: channel === "local" ? selectedAsset.localSourceOf || "" : selectedAsset.sourceOf, note: channel === "local" ? selectedAsset.localNote || "" : selectedAsset.note, dataUrls };
+        const payload = await postProvider({ action: "analyze", references: [reference] }, channel);
+        const returned = (payload.analyses as AssetRecord["analysis"][])?.[0];
+        analysis = returned ? { ...returned, channel } : undefined;
       }
       if (!analysis) throw new Error("The vision model returned no analysis.");
-      const updated = { ...selectedAsset, analysis };
-      patchAsset(selectedAsset.id, { analysis });
+      const updated = { ...selectedAsset, ...(channel === "local" ? { localAnalysis: analysis } : { analysis }) };
+      patchAsset(selectedAsset.id, channel === "local" ? { localAnalysis: analysis } : { analysis });
+      const metadata = { canonicalName: updated.canonicalName, role: updated.role, referenceUse: updated.referenceUse, sourceOf: updated.sourceOf, note: updated.note, localSourceOf: updated.localSourceOf, localNote: updated.localNote, trimStart: updated.trimStart, trimEnd: updated.trimEnd, width: updated.sourceWidth, height: updated.sourceHeight, duration: updated.sourceDuration };
       const saved = activeProject && updated.relativePath
-        ? Boolean(await updateProjectAsset(activeProject.id, updated.relativePath, { metadata: { canonicalName: updated.canonicalName, role: updated.role, referenceUse: updated.referenceUse, sourceOf: updated.sourceOf, note: updated.note, trimStart: updated.trimStart, trimEnd: updated.trimEnd, width: updated.sourceWidth, height: updated.sourceHeight, duration: updated.sourceDuration }, analysis: analysis as unknown as Record<string, unknown> }))
+        ? Boolean(await updateProjectAsset(activeProject.id, updated.relativePath, { metadata, ...(channel === "local" ? { localAnalysis: analysis as unknown as Record<string, unknown> } : { analysis: analysis as unknown as Record<string, unknown> }) }))
         : await writeAssetSidecar(updated);
-      setMessage(`${selectedAsset.name} analyzed${saved ? `; ${sidecarName(selectedAsset.name)} updated on disk` : "; metadata retained in browser storage"}.`);
+      setMessage(`${selectedAsset.name} ${channel} analysis saved${saved ? `; ${sidecarName(selectedAsset.name)} updated on disk` : "; metadata retained in browser storage"}.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : "Analysis failed."); }
     finally { setBusy(null); }
   }
@@ -874,8 +943,8 @@ export function SingleShotApp() {
         action: "expand-single",
         simplePrompt,
         durationSeconds,
-        assets: chosenAssets.map(({ id, name, kind, canonicalName, role, referenceUse, sourceOf, note }) => ({ id, name, kind, canonicalName, role, referenceUse, sourceOf, note })),
-        analyses: chosenAssets.map((asset) => asset.analysis).filter(Boolean),
+        assets: chosenAssets.map(({ id, name, kind, canonicalName, role, referenceUse, sourceOf, note, localSourceOf, localNote }) => ({ id, name, kind, canonicalName, role, referenceUse, sourceOf, note, localSourceOf, localNote })),
+        analyses: chosenAssets.flatMap((asset) => [asset.analysis ? { ...asset.analysis, channel: "strong" as const } : null, asset.localAnalysis ? { ...asset.localAnalysis, channel: "local" as const } : null]).filter(Boolean),
         attachments: compiled.attachments,
         subjects: compiled.subjects,
         taskTypes: compiled.taskTypes,
@@ -937,7 +1006,7 @@ export function SingleShotApp() {
       const result = await sealJobZip({
         assets: chosenAssets,
         files: managedFiles,
-        sidecars: new Map(chosenAssets.map((asset) => [asset.id, JSON.stringify(makeReferenceSidecar(asset, settings), null, 2)])),
+        sidecars: new Map(chosenAssets.map((asset) => [asset.id, JSON.stringify(makeReferenceSidecar(asset, { strong: settings, local: localSettings }), null, 2)])),
         prompt: generatedPrompt,
         request: simplePrompt,
         duration: durationSeconds,
@@ -981,17 +1050,20 @@ export function SingleShotApp() {
     setMessage("Provider request canceled.");
   }
 
-  async function testProvider(silent = false) {
+  async function testProvider(channel: "strong" | "local" = "strong", silent = false) {
+    const connection = channel === "local" ? localSettings : settings;
+    const setConnectionStatus = channel === "local" ? setLocalProviderStatus : setProviderStatus;
     if (providerProbeActive.current || (silent && busy)) return;
-    if (settings.provider === "demo") { setProviderStatus("connected"); if (!silent) setMessage("Demo mode is ready and makes no network calls."); return; }
-    if (settings.provider === "openrouter" && !settings.apiKey.trim()) { setProviderStatus("unknown"); return; }
+    if (connection.provider === "demo") { setConnectionStatus("connected"); if (!silent) setMessage(`${channel} demo mode is ready and makes no network calls.`); return; }
+    if (!connection.visionModel.trim()) { setConnectionStatus("unknown"); if (!silent) setMessage(`Choose the ${channel} vision model first.`); return; }
+    if (connection.provider === "openrouter" && !connection.apiKey.trim()) { setConnectionStatus("unknown"); if (!silent) setMessage(`Enter the ${channel} OpenRouter API key first.`); return; }
     providerProbeActive.current = true;
-    if (!silent) setBusy("test");
+    if (!silent) setBusy(channel === "local" ? "test-local" : "test-strong");
     try {
-      const payload = await postProvider({ action: "test" });
-      setProviderStatus("connected");
-      if (!silent) setMessage(String(payload.message || "Provider connected."));
-    } catch (error) { setProviderStatus("failed"); if (!silent) setMessage(error instanceof Error ? error.message : "Connection test failed."); }
+      const payload = await postProvider({ action: "test" }, channel);
+      setConnectionStatus("connected");
+      if (!silent) setMessage(`${channel}: ${String(payload.message || "provider connected.")}`);
+    } catch (error) { setConnectionStatus("failed"); if (!silent) setMessage(error instanceof Error ? error.message : `${channel} connection test failed.`); }
     finally { providerProbeActive.current = false; if (!silent) setBusy(null); }
   }
 
@@ -1021,7 +1093,7 @@ export function SingleShotApp() {
 
   return (
     <main className="app-shell">
-      <header className="topbar"><div className="brand-block"><span className="brand-mark" aria-hidden="true"><img src="/dummyplug-head.png" alt="" /></span><div><h1>dummyplug</h1><p>job bundler · MiniMax H3</p></div></div><div className="top-actions"><span className={`provider-state provider-${settings.provider}`}><i className={`provider-dot ${providerStatus}`} aria-hidden="true" />{settings.provider}</span><button className="project-button" onClick={() => setProjectDialogOpen(true)}>{activeProject?.name || "choose project"}</button><button className="heart-button" aria-label="settings" title="settings" onClick={() => setSettingsOpen(true)}><span aria-hidden="true">♥</span></button></div></header>
+      <header className="topbar"><div className="brand-block"><span className="brand-mark" aria-hidden="true"><img src="/dummyplug-head.png" alt="" /></span><div><h1>dummyplug</h1><p>job bundler · MiniMax H3</p></div></div><div className="top-actions"><span className={`provider-state provider-${settings.provider}`} title="strong provider"><i className={`provider-dot ${providerStatus}`} aria-hidden="true" />strong {settings.provider}</span><span className={`provider-state provider-${localSettings.provider}`} title="local provider"><i className={`provider-dot ${localProviderStatus}`} aria-hidden="true" />local {localSettings.provider}</span><button className="project-button" onClick={() => setProjectDialogOpen(true)}>{activeProject?.name || "choose project"}</button><button className="heart-button" aria-label="settings" title="settings" onClick={() => setSettingsOpen(true)}><span aria-hidden="true">♥</span></button></div></header>
       <section className="status-strip" aria-live="polite"><span className={busy ? "pulse-dot" : "status-dot"} /><span>{message}</span><span className="status-metrics">{assets.length} assets · {analyzedCount} analyzed · {chosenAssets.length} selected</span></section>
 
       <div className="single-grid">
@@ -1039,7 +1111,7 @@ export function SingleShotApp() {
               <button type="button" className="asset-check" title="Include in the current job" aria-pressed={asset.selected} onClick={(event) => { event.stopPropagation(); toggleJobAsset(asset.id); }}><span>{asset.selected ? "✓" : ""}</span></button>
               <button className="db-select" onClick={() => setSelectedAssetId(asset.id)}>
               <div className="db-thumb">{asset.kind === "image" && asset.previewUrl ? <img src={asset.previewUrl} alt="" /> : asset.kind === "video" && asset.previewUrl ? <video src={asset.previewUrl} muted /> : <span>{asset.kind === "audio" ? "♫" : "?"}</span>}<b>{index + 1}</b></div>
-              <div className="db-copy"><strong>{asset.canonicalName || asset.name}</strong><span>{asset.role} · {asset.referenceUse} · {asset.analysis ? "vision saved" : "not analyzed"}</span><p>{asset.sourceOf || asset.note || "no source-of authority yet"}</p></div>
+              <div className="db-copy"><strong>{asset.canonicalName || asset.name}</strong><span>{asset.role} · {asset.referenceUse} · {asset.analysis ? "strong saved" : "strong empty"} · {asset.localAnalysis ? "local saved" : "local empty"}</span><p>{asset.sourceOf || asset.localSourceOf || asset.note || asset.localNote || "no source-of authority yet"}</p></div>
               </button>
               <button className="row-remove" onClick={(event) => { event.stopPropagation(); void removeAsset(asset.id); }} aria-label={`Move ${asset.name} to project trash`}>×</button>
             </article>; })}
@@ -1057,10 +1129,8 @@ export function SingleShotApp() {
             <label className="meta-field"><span>canonical name</span><input value={selectedAsset.canonicalName} onChange={(event) => patchAsset(selectedAsset.id, { canonicalName: event.target.value })} onBlur={() => void saveSelectedMetadata()} placeholder="Rabbit" /></label>
             <label className="meta-field"><span>role</span><select value={selectedAsset.role} onChange={(event) => patchAsset(selectedAsset.id, { role: event.target.value as AssetRole })} onBlur={() => void saveSelectedMetadata()}>{ROLE_OPTIONS.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}</select></label>
             <label className="meta-field"><span>H3 use</span><select value={selectedAsset.referenceUse} onChange={(event) => patchAsset(selectedAsset.id, { referenceUse: event.target.value as ReferenceUse })} onBlur={() => void saveSelectedMetadata()}>{REFERENCE_USE_OPTIONS[selectedAsset.kind].map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><small>Subject sources are cited inside a Subject. Picture and Video entries are created only for the explicit structural uses named here.</small></label>
-            <label className="meta-field"><span>source of</span><textarea value={selectedAsset.sourceOf} onChange={(event) => patchAsset(selectedAsset.id, { sourceOf: event.target.value })} onBlur={() => void saveSelectedMetadata()} placeholder="face, body, wardrobe, drunken happy expression" /></label>
-            <label className="meta-field"><span>your note</span><textarea value={selectedAsset.note} onChange={(event) => patchAsset(selectedAsset.id, { note: event.target.value })} onBlur={() => void saveSelectedMetadata()} placeholder="This is the main character, Rabbit. She's drunk and happy in this reference." /></label>
-            <div className="metadata-actions"><button className="primary" disabled={Boolean(busy) || selectedAsset.missingFile || selectedAsset.kind === "audio"} onClick={() => void analyzeSelected()}>{busy === "analyze" ? "analyzing…" : selectedAsset.kind === "audio" ? "manual metadata for audio" : selectedAsset.analysis ? "re-analyze this asset" : "analyze this asset"}</button><button className="secondary" onClick={() => downloadSidecar(selectedAsset)}>download json</button></div>
-            {selectedAsset.analysis ? <div className="vision-record"><div className="vision-head"><strong>vision record</strong><span>{selectedAsset.analysis.analysisRole || "general"}</span></div><section><h3>summary</h3><p>{selectedAsset.analysis.summary}</p></section><details open><summary>subjects</summary>{selectedAsset.analysis.subjects.map((item) => <p key={item}>{item}</p>)}</details><details><summary>setting</summary><p>{selectedAsset.analysis.setting}</p></details><details><summary>style</summary><p>{selectedAsset.analysis.style}</p></details><details><summary>composition</summary><p>{selectedAsset.analysis.composition}</p></details><details><summary>motion</summary><p>{selectedAsset.analysis.motion}</p></details><details><summary>continuity locks</summary><ul>{selectedAsset.analysis.continuityLocks.map((item) => <li key={item}>{item}</li>)}</ul></details></div> : <div className="vision-empty"><span>vision is optional and on command</span><p>Your metadata is already usable. Analysis adds visible evidence without replacing it.</p></div>}
+            <section className="analysis-channel analysis-channel-strong"><div className="analysis-channel-head"><strong>strong</strong><span>primary visual authority</span></div><label className="meta-field"><span>strong source of</span><textarea value={selectedAsset.sourceOf} onChange={(event) => patchAsset(selectedAsset.id, { sourceOf: event.target.value })} onBlur={() => void saveSelectedMetadata()} placeholder="face, body, wardrobe, drunken happy expression" /></label><label className="meta-field"><span>strong note</span><textarea value={selectedAsset.note} onChange={(event) => patchAsset(selectedAsset.id, { note: event.target.value })} onBlur={() => void saveSelectedMetadata()} placeholder="This is the main character, Rabbit. She's drunk and happy in this reference." /></label><div className="metadata-actions"><button className="primary" disabled={Boolean(busy) || selectedAsset.missingFile || selectedAsset.kind === "audio"} onClick={() => void analyzeSelected("strong")}>{busy === "analyze-strong" ? "analyzing strongly…" : selectedAsset.kind === "audio" ? "manual metadata for audio" : selectedAsset.analysis ? "re-analyze strongly" : "analyze strongly"}</button><button className="secondary" onClick={() => downloadSidecar(selectedAsset)}>download json</button></div><VisionRecord analysis={selectedAsset.analysis} channel="strong" /></section>
+            <section className="analysis-channel analysis-channel-local"><div className="analysis-channel-head"><strong>local</strong><span>separate private evidence</span></div><label className="meta-field"><span>local source of</span><textarea value={selectedAsset.localSourceOf || ""} onChange={(event) => patchAsset(selectedAsset.id, { localSourceOf: event.target.value })} onBlur={() => void saveSelectedMetadata()} placeholder="anatomy, explicit state, NSFW details, local-only authority" /></label><label className="meta-field"><span>local note</span><textarea value={selectedAsset.localNote || ""} onChange={(event) => patchAsset(selectedAsset.id, { localNote: event.target.value })} onBlur={() => void saveSelectedMetadata()} placeholder="Instructions intended specifically for the local analysis model." /></label><div className="metadata-actions local-analysis-actions"><button className="primary" disabled={Boolean(busy) || selectedAsset.missingFile || selectedAsset.kind === "audio" || (localSettings.provider !== "demo" && !localSettings.visionModel.trim())} onClick={() => void analyzeSelected("local")}>{busy === "analyze-local" ? "analyzing locally…" : selectedAsset.kind === "audio" ? "manual metadata for audio" : localSettings.provider !== "demo" && !localSettings.visionModel.trim() ? "set local model in ♥" : selectedAsset.localAnalysis ? "re-analyze locally" : "analyze locally"}</button></div><VisionRecord analysis={selectedAsset.localAnalysis} channel="local" /></section>
           </> : <div className="vision-empty"><span>select an asset</span><p>Its preview, your durable tags, and the vision record appear here.</p></div>}
         </section>
 
@@ -1084,17 +1154,10 @@ export function SingleShotApp() {
 
       <ProjectDialog open={projectDialogOpen} projects={projects} activeProjectId={activeProject?.id || ""} activeProjectName={activeProject?.name || ""} activeProjectPath={activeProject ? `${projectRoot.replace(/[\\/]$/, "")}\\${activeProject.name}` : projectRoot} settings={activeProject?.outputSettings || DEFAULT_PROJECT_OUTPUT_SETTINGS} onClose={() => setProjectDialogOpen(false)} onSelect={(id) => { void openProject(id).catch((error) => setMessage(error instanceof Error ? error.message : "Could not open the project.")); }} onCreate={createAndOpenProject} legacyAssetCount={legacyAssetCount} onMigrate={migrateLegacyWorkspace} onSettingsChange={(patch) => void patchProjectOutputSettings(patch)} />
 
-      {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="settings-sheet" role="dialog" aria-modal="true"><div className="settings-head"><div><span className="heart-large">♥</span><div><h2>{settingsPage === "connection" ? "model connections" : settingsPage === "prompts" ? "system prompts" : "job naming"}</h2><p>{settingsPage === "connection" ? "Two models: vision metadata and prompt expansion." : settingsPage === "prompts" ? "The exact recipes used by this reduced workflow." : "Editable verb families used by automatic job descriptions."}</p></div></div><button onClick={() => setSettingsOpen(false)} aria-label="Close settings">×</button></div><nav className="inline-settings-tabs settings-tabs-three"><button className={settingsPage === "connection" ? "active" : ""} onClick={() => setSettingsPage("connection")}>connection</button><button className={settingsPage === "prompts" ? "active" : ""} onClick={() => setSettingsPage("prompts")}>prompts</button><button className={settingsPage === "naming" ? "active" : ""} onClick={() => setSettingsPage("naming")}>naming</button></nav>{settingsPage === "connection" ? <>
-        <div className={`settings-status ${busy ? "active" : ""}`} aria-live="polite"><strong>{busy === "test" ? "testing OpenRouter…" : busy ? "request running…" : "provider status"}</strong><p>{message}</p></div>
-        <label className="field"><span>provider</span><select value={settings.provider} onChange={(event) => setSettings({ ...settings, provider: event.target.value as ModelSettings["provider"] })}><option value="demo">offline demo</option><option value="openrouter">OpenRouter</option><option value="local">local OpenAI-compatible server</option></select></label>
-        {settings.provider === "local" && <label className="field"><span>server address</span><input value={settings.baseUrl} onChange={(event) => setSettings({ ...settings, baseUrl: event.target.value })} /></label>}
-        <label className="field"><span>vision model</span><input disabled={settings.provider === "demo"} value={settings.visionModel} onChange={(event) => setSettings({ ...settings, visionModel: event.target.value })} /></label>
-        <label className="field"><span>prompt model</span><input disabled={settings.provider === "demo"} value={settings.promptModel} onChange={(event) => setSettings({ ...settings, promptModel: event.target.value })} /></label>
-        <label className="field"><span>prompt output tokens</span><input type="number" min={8192} max={32768} step={4096} disabled={settings.provider === "demo"} value={settings.promptMaxTokens} onChange={(event) => setSettings({ ...settings, promptMaxTokens: Math.max(8192, Math.min(32768, Number(event.target.value) || 32768)) })} /></label>
-        {settings.provider !== "demo" && <label className="field"><span>api key</span><input type="password" value={settings.apiKey} onChange={(event) => setSettings({ ...settings, apiKey: event.target.value })} autoComplete="off" /></label>}
-        {settings.provider !== "demo" && <label className="check-field"><input type="checkbox" checked={settings.rememberKey} onChange={(event) => setSettings({ ...settings, rememberKey: event.target.checked })} /><span>remember key in this browser profile</span></label>}
-        <label className="field"><span>temperature <output>{settings.temperature.toFixed(1)}</output></span><input type="range" min="0" max="1" step="0.1" disabled={settings.provider === "demo"} value={settings.temperature} onChange={(event) => setSettings({ ...settings, temperature: Number(event.target.value) })} /></label>
-        <div className="settings-actions"><button className="secondary" onClick={() => setSettings(DEFAULT_SETTINGS)}>reset models</button><button className="secondary request-reset" onClick={cancelRequest}>{busy ? "cancel request" : "reset request"}</button><button className="secondary" disabled={Boolean(busy)} onClick={() => void testProvider()}>{busy === "test" ? "testing…" : "test"}</button><button className="primary" onClick={() => setSettingsOpen(false)}>done</button></div>
+      {settingsOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><section className="settings-sheet" role="dialog" aria-modal="true"><div className="settings-head"><div><span className="heart-large">♥</span><div><h2>{settingsPage === "connection" ? "model connections" : settingsPage === "prompts" ? "system prompts" : "job naming"}</h2><p>{settingsPage === "connection" ? "Separate strong and local analysis paths; strong also writes the final prompt." : settingsPage === "prompts" ? "The exact recipes used by this reduced workflow." : "Editable verb families used by automatic job descriptions."}</p></div></div><button onClick={() => setSettingsOpen(false)} aria-label="Close settings">×</button></div><nav className="inline-settings-tabs settings-tabs-three"><button className={settingsPage === "connection" ? "active" : ""} onClick={() => setSettingsPage("connection")}>connection</button><button className={settingsPage === "prompts" ? "active" : ""} onClick={() => setSettingsPage("prompts")}>prompts</button><button className={settingsPage === "naming" ? "active" : ""} onClick={() => setSettingsPage("naming")}>naming</button></nav>{settingsPage === "connection" ? <>
+        <div className={`settings-status ${busy ? "active" : ""}`} aria-live="polite"><strong>{busy?.startsWith("test-") ? "testing connection…" : busy ? "request running…" : "provider status"}</strong><p>{message}</p></div>
+        <div className="connection-profiles"><ConnectionEditor channel="strong" value={settings} status={providerStatus} busy={Boolean(busy)} onChange={setSettings} onTest={() => void testProvider("strong")} /><ConnectionEditor channel="local" value={localSettings} status={localProviderStatus} busy={Boolean(busy)} onChange={setLocalSettings} onTest={() => void testProvider("local")} /></div>
+        <div className="settings-actions"><button className="secondary" onClick={() => { setSettings(DEFAULT_SETTINGS); setLocalSettings(DEFAULT_LOCAL_SETTINGS); }}>reset models</button><button className="secondary request-reset" onClick={cancelRequest}>{busy ? "cancel request" : "reset request"}</button><button className="primary" onClick={() => setSettingsOpen(false)}>done</button></div>
       </> : settingsPage === "prompts" ? <><div className="prompt-registry-intro"><strong>DaSiWa single-take recipes</strong><p>Vision recipes create durable asset evidence. The final recipe applies the official full-reference label roles while expanding one request into one uninterrupted take.</p><button className="secondary" onClick={() => setPromptOverrides({})}>reset to defaults</button></div><div className="prompt-registry">{EXPOSED_PROMPT_TEMPLATES.map((item) => <article className="system-prompt-card" key={item.id}><div className="system-prompt-head"><div><h3>{item.title}</h3><span>{item.modelRole}</span></div><button className="secondary" onClick={() => { void navigator.clipboard.writeText(promptOverrides[item.id] ?? item.template); setCopiedPromptId(item.id); window.setTimeout(() => setCopiedPromptId(null), 1200); }}>{copiedPromptId === item.id ? "copied" : "copy"}</button></div><p>{item.description}</p><textarea value={promptOverrides[item.id] ?? item.template} onChange={(event) => patchPromptTemplate(item.id, event.target.value)} spellCheck={false} /></article>)}</div></> : <div className="naming-settings"><p>One family per line: <code>walk: walk, walks, walked, walking</code>. “to be” is deliberately excluded.</p><textarea value={verbText} onChange={(event) => setVerbText(event.target.value)} onBlur={() => commitVerbVocabulary()} spellCheck={false} /><div><button className="secondary" onClick={resetVerbVocabulary}>reset vocabulary</button><button className="primary" onClick={() => commitVerbVocabulary()}>save vocabulary</button></div></div>}
       </section></div>}
     </main>

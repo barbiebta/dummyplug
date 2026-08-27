@@ -23,6 +23,8 @@ Declared role: {{role}}
 Declared H3 use: {{referenceUse}}
 Use this asset as the source of: {{sourceOf}}
 User note: {{userNote}}
+Analysis channel: {{analysisChannel}}
+{{channelInstruction}}
 
 Return only one valid JSON object with exactly these keys:
 {"summary":"string","subjects":["string"],"setting":"string","style":"string","composition":"string","motion":"string","continuityLocks":["string"],"usableAs":["string"]}`;
@@ -58,10 +60,10 @@ Simple request:
 
 Requested duration: {{durationSeconds}} seconds.
 
-Selected asset catalog, including durable user-authored identity, role, and source-of authority:
+Selected asset catalog, including durable user-authored identity, role, and separate strong/local source authority:
 {{assetCatalogJson}}
 
-Vision metadata for those assets:
+Strong and local vision metadata for those assets. Each record names its channel:
 {{visionAnalysesJson}}
 
 Attachment labels assigned by dummyplug:
@@ -76,7 +78,8 @@ Required summary task prefix (already resolved from the declared H3 uses):
 Reference rules:
 - Physical references are numbered by type and selected-list order: images as <Picture N>, then videos as <Video N>, then audio as <Audio N>. Use only the supplied labels. Never rename, renumber, omit, or invent one.
 - Filenames and filesystem paths are internal mapping data only. Never reproduce a filename or path anywhere in the six-part output. Refer to every source exclusively through its assigned <Picture N>, <Video N>, <Audio N>, or resolved <Subject N> label.
-- Treat canonicalName, role, sourceOf, and note as authoritative instructions about what each asset means. Treat vision metadata as detailed visible evidence.
+- Treat canonicalName and role as shared authority. Treat sourceOf/note as the strong channel's manual authority and localSourceOf/localNote as the local channel's manual authority. Neither channel overwrites the other.
+- Treat strong and local vision records as complementary visible evidence. Local records may contain more direct anatomical or NSFW observations; retain relevant concrete evidence instead of silently dropping it. When records conflict, preserve the conflict unless the manual authority resolves it. Do not let either analysis invent content absent from the request and references.
 - <Subject N> is the visible content that actually appears: people, objects, scenes, clothing, styles, actions, expressions or poses. Use every resolved Subject label exactly as supplied. Assets grouped under one Subject are complementary authorities for the same content.
 - Cite each source <Picture N> or <Video N> inside its resolved Subject definition and say what that source contributes.
 - Create a separate <Picture N> definition and retention line ONLY when its attachment-map standaloneEntry is true because referenceUse is frame-anchor. Otherwise it is merely provenance inside a Subject definition.
@@ -138,7 +141,11 @@ export function visionTemplateId(role: VisionAnalysisRole): PromptTemplateId {
 
 export function buildVisionPrompt(reference: PreparedReference, template?: string) {
   const role = selectVisionAnalysisRole(reference);
-  return substitute(template || DEFAULT_PROMPT_TEMPLATES[visionTemplateId(role)], {
+  const source = template || DEFAULT_PROMPT_TEMPLATES[visionTemplateId(role)];
+  const channelInstruction = reference.analysisChannel === "local"
+    ? "This is the separate local evidence channel. Record direct, production-useful NSFW, anatomical, sexual-state, exposure, contact, fluid, pose, and garment-state details when visibly supported or explicitly requested. Use neutral exact language; do not euphemize, moralize, or omit relevant adult evidence. Keep uncertainty explicit and do not invent unseen anatomy or acts."
+    : "This is the strong evidence channel. Prioritize precise visible identity, environment, style, composition, and continuity evidence while following the declared role.";
+  const prompt = substitute(source, {
     assetId: reference.assetId,
     filename: reference.name,
     canonicalName: reference.canonicalName || "not supplied",
@@ -146,13 +153,16 @@ export function buildVisionPrompt(reference: PreparedReference, template?: strin
     referenceUse: reference.referenceUse,
     sourceOf: reference.sourceOf || "not supplied",
     userNote: reference.note || "none",
+    analysisChannel: reference.analysisChannel || "strong",
+    channelInstruction,
   });
+  return source.includes("{{channelInstruction}}") ? prompt : `${prompt}\n\n${channelInstruction}`;
 }
 
 export function buildSingleShotPrompt(
   simplePrompt: string,
   durationSeconds: number,
-  assets: Array<{ id: string; name: string; kind: string; canonicalName: string; role: string; referenceUse: string; sourceOf: string; note: string }>,
+  assets: Array<{ id: string; name: string; kind: string; canonicalName: string; role: string; referenceUse: string; sourceOf: string; note: string; localSourceOf?: string; localNote?: string }>,
   analyses: AssetAnalysis[],
   attachments: AttachmentSpec[],
   subjects: SubjectSpec[] = [],
@@ -165,6 +175,7 @@ export function buildSingleShotPrompt(
     assetCatalogJson: JSON.stringify(assets, null, 2),
     visionAnalysesJson: JSON.stringify(analyses.map((analysis) => ({
       assetId: analysis.assetId,
+      channel: analysis.channel || "strong",
       analysisRole: analysis.analysisRole,
       summary: analysis.summary,
       subjects: analysis.subjects,
