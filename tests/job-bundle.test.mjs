@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import JSZip from "jszip";
-import { DEFAULT_JOB_SETTINGS, normalizeJobSettings, randomSeed, sealJobZip, sha256Hex, validateJobSettings, validateVideoTrim } from "../lib/job-bundle.ts";
+import { DEFAULT_JOB_SETTINGS, DUMMYPLUG_JOB_SCHEMA, normalizeJobSettings, randomSeed, sealJobZip, sha256Hex, validateJobSettings, validateManifestV2, validateVideoTrim } from "../lib/job-bundle.ts";
 import { compileAttachments } from "../lib/single-h3.ts";
 import { DIRECTOR_INPUT_SCALING_OPTIONS } from "../lib/types.ts";
 
@@ -62,6 +63,14 @@ test("input scaling exactly mirrors MiniMax H3 Director", () => {
     assert.deepEqual(validateJobSettings({ ...DEFAULT_JOB_SETTINGS, inputScaling: value }, 5), []);
   }
   assert.match(validateJobSettings({ ...DEFAULT_JOB_SETTINGS, inputScaling: "native" }, 5).join(" "), /Input scaling/);
+});
+
+test("v2 output geometry and duration match the Unit05 execution contract", () => {
+  assert.deepEqual(validateJobSettings({ ...DEFAULT_JOB_SETTINGS, width: 768, height: 1344 }, 5), []);
+  assert.match(validateJobSettings({ ...DEFAULT_JOB_SETTINGS, width: 770 }, 5).join(" "), /multiple of 16/);
+  assert.match(validateJobSettings({ ...DEFAULT_JOB_SETTINGS, height: 1350 }, 5).join(" "), /multiple of 16/);
+  assert.match(validateJobSettings(DEFAULT_JOB_SETTINGS, 5.5).join(" "), /whole number/);
+  assert.match(validateJobSettings({ ...DEFAULT_JOB_SETTINGS, outputQuality: 21.5 }, 5).join(" "), /whole number/);
 });
 
 test("legacy combined scaling selections migrate to split settings", () => {
@@ -171,7 +180,8 @@ test("seals an independently verifiable REF2VA job archive", async () => {
   assert.ok(paths.includes("reference-map.json"));
   assert.ok(paths.includes("checksums.json"));
   const manifest = JSON.parse(await zip.file("manifest.json").async("string"));
-  assert.equal(manifest.schema, "dummyplug.h3-job.v2");
+  assert.equal(manifest.schema, DUMMYPLUG_JOB_SCHEMA);
+  assert.deepEqual(validateManifestV2(manifest), []);
   assert.equal(manifest.job_id, "11111111-2222-4333-8444-555555555555");
   assert.equal(manifest.job_desc, "Rabbit walk");
   assert.equal(manifest.title, "Rabbit project");
@@ -198,4 +208,56 @@ test("seals an independently verifiable REF2VA job archive", async () => {
   const allText = await Promise.all(paths.filter((path) => /\.(json|txt)$/.test(path)).map((path) => zip.file(path).async("string")));
   const archiveText = allText.join("\n");
   assert.doesNotMatch(archiveText, /C:\\Users\\|sk-or-v1-|apiKey|Authorization/i);
+});
+
+test("v2 manifest validation enforces sequential H3 labels and executable reference metadata", async () => {
+  const compiled = compileAttachments(assets);
+  const result = await sealJobZip({
+    assets,
+    files: new Map(assets.map((asset, index) => [asset.id, new Uint8Array([index, 2, 3, 4])])),
+    sidecars: new Map(), prompt: validPrompt(), request: "one take", duration: 5,
+    settings: DEFAULT_JOB_SETTINGS, subjects: compiled.subjects,
+    jobId: "manifest-test", jobDesc: "Manifest test", now: new Date("2026-11-20T20:00:00.000Z"),
+  });
+  const invalid = structuredClone(result.manifest);
+  invalid.references[0].label = "<Picture 9>";
+  invalid.references[2].trim_end = 99;
+  assert.match(validateManifestV2(invalid).join(" "), /invalid H3 label/);
+  assert.match(validateManifestV2(invalid).join(" "), /trim_start < trim_end <= source_duration/);
+  const incomplete = structuredClone(result.manifest);
+  delete incomplete.prompt_policy;
+  delete incomplete.generation.output;
+  assert.match(validateManifestV2(incomplete).join(" "), /prompt_policy/);
+  assert.match(validateManifestV2(incomplete).join(" "), /Output container is required/);
+});
+
+test("fixed v2 inputs produce byte-identical ZIP archives", async () => {
+  const compiled = compileAttachments(assets);
+  const input = {
+    assets,
+    files: new Map(assets.map((asset, index) => [asset.id, new Uint8Array([index, 2, 3, 4])])),
+    sidecars: new Map(), prompt: validPrompt(), request: "one take", duration: 5,
+    settings: DEFAULT_JOB_SETTINGS, subjects: compiled.subjects,
+    jobId: "deterministic-test", jobDesc: "Deterministic test", now: new Date("2026-11-20T20:00:00.000Z"),
+  };
+  const first = await sealJobZip(input);
+  const second = await sealJobZip(input);
+  assert.deepEqual(first.bytes, second.bytes);
+});
+
+test("committed Unit05 compatibility fixture is a sealed v2 bundle", async () => {
+  const bytes = new Uint8Array(await readFile(new URL("./fixtures/dummyplug-h3-job-v2.dummyjob.zip", import.meta.url)));
+  assert.equal(await sha256Hex(bytes), "3cd516c17882a607804bfb7b11e004786f0f672cde3dbef7087f6a54e548ec2b");
+  const zip = await JSZip.loadAsync(bytes);
+  const manifest = JSON.parse(await zip.file("manifest.json").async("string"));
+  assert.deepEqual(validateManifestV2(manifest), []);
+  assert.equal(manifest.references.length, 3);
+  assert.deepEqual(manifest.references.map(({ label, order }) => ({ label, order })), [
+    { label: "<Picture 1>", order: 0 },
+    { label: "<Picture 2>", order: 1 },
+    { label: "<Video 1>", order: 2 },
+  ]);
+  assert.equal(manifest.references[2].trim_start, 0.25);
+  assert.equal(manifest.references[2].trim_end, 0.75);
+  assert.equal(await zip.file("request.txt").async("string"), "Manually authored final H3 prompt.");
 });

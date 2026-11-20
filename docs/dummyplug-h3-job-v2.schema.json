@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dummyplug.local/schema/dummyplug-h3-job-v2.schema.json",
+  "title": "Dummyplug H3 job manifest v2",
+  "type": "object",
+  "required": ["schema", "job_id", "job_desc", "created_at", "workflow", "prompt_policy", "generation", "references"],
+  "properties": {
+    "schema": { "const": "dummyplug.h3-job.v2" },
+    "job_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "job_desc": { "type": "string", "minLength": 1, "maxLength": 30 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "title": { "type": "string", "minLength": 1 },
+    "workflow": {
+      "type": "object",
+      "required": ["template", "version"],
+      "properties": {
+        "template": { "const": "dasiwa-ref2va" },
+        "version": { "const": 1 }
+      },
+      "additionalProperties": true
+    },
+    "prompt_policy": {
+      "type": "object",
+      "required": ["allCharactersTransgenderWomen", "allowedVocabulary"],
+      "properties": {
+        "allCharactersTransgenderWomen": { "type": "boolean" },
+        "allowedVocabulary": {
+          "type": "object",
+          "required": ["man", "woman", "trans", "futa"],
+          "properties": {
+            "man": { "type": "boolean" },
+            "woman": { "type": "boolean" },
+            "trans": { "type": "boolean" },
+            "futa": { "type": "boolean" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "generation": {
+      "type": "object",
+      "required": ["width", "height", "duration", "fps", "seed", "steps", "sampler", "shift_video", "shift_audio", "ref_image_size", "input_scaling", "output"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 64, "maximum": 8192, "multipleOf": 16 },
+        "height": { "type": "integer", "minimum": 64, "maximum": 8192, "multipleOf": 16 },
+        "duration": { "type": "integer", "minimum": 1, "maximum": 20 },
+        "fps": { "type": "number", "minimum": 1, "maximum": 120 },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "steps": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "sampler": { "type": "string", "minLength": 1 },
+        "shift_video": { "type": "number" },
+        "shift_audio": { "type": "number" },
+        "ref_image_size": { "enum": ["match", "max"] },
+        "input_scaling": { "enum": ["Off", "Auto", "Target", "Fit", "Fill and crop", "Fit and pad", "Long side with divisible crop"] },
+        "output": {
+          "type": "object",
+          "required": ["container", "codec", "quality", "audio_codec", "audio_bitrate"],
+          "properties": {
+            "container": { "type": "string", "minLength": 1 },
+            "codec": { "type": "string", "minLength": 1 },
+            "quality": { "type": "integer", "minimum": 0, "maximum": 51 },
+            "audio_codec": { "type": "string", "minLength": 1 },
+            "audio_bitrate": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "references": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/reference" }
+    }
+  },
+  "$defs": {
+    "reference": {
+      "type": "object",
+      "required": ["asset_id", "path", "kind", "order", "label", "sha256", "size", "mime_type"],
+      "properties": {
+        "asset_id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "pattern": "^assets/[A-Za-z0-9._-]+$" },
+        "kind": { "enum": ["image", "video", "audio"] },
+        "order": { "type": "integer", "minimum": 0 },
+        "label": { "type": "string", "pattern": "^<(Picture|Video|Audio) [1-9][0-9]*>$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "size": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "mime_type": { "type": "string", "minLength": 1 },
+        "source_width": { "type": "integer", "minimum": 1 },
+        "source_height": { "type": "integer", "minimum": 1 },
+        "source_duration": { "type": "number", "exclusiveMinimum": 0 },
+        "trim_start": { "type": "number", "minimum": 0 },
+        "trim_end": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "enum": ["image", "video"] } }, "required": ["kind"] },
+          "then": { "required": ["source_width", "source_height"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "video" } }, "required": ["kind"] },
+          "then": { "required": ["source_duration", "trim_start", "trim_end"] },
+          "else": { "not": { "anyOf": [{ "required": ["trim_start"] }, { "required": ["trim_end"] }] } }
+        }
+      ],
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

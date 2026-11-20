@@ -6,6 +6,10 @@ import type { AssetRecord, JobSettings, SubjectSpec } from "./types.ts";
 
 type BinarySource = Blob | ArrayBuffer | Uint8Array;
 
+export const DUMMYPLUG_JOB_SCHEMA = "dummyplug.h3-job.v2" as const;
+export const JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+export const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
 export interface SealJobInput {
   assets: AssetRecord[];
   files: Map<string, BinarySource>;
@@ -112,9 +116,9 @@ export function validateVideoTrim(asset: AssetRecord) {
 
 export function validateJobSettings(settings: JobSettings, duration: number) {
   const errors: string[] = [];
-  if (!Number.isInteger(settings.width) || settings.width < 64 || settings.width > 8192) errors.push("Width must be an integer from 64 to 8192.");
-  if (!Number.isInteger(settings.height) || settings.height < 64 || settings.height > 8192) errors.push("Height must be an integer from 64 to 8192.");
-  if (!Number.isFinite(duration) || duration < 1 || duration > 20) errors.push("Duration must be from 1 to 20 seconds.");
+  if (!Number.isInteger(settings.width) || settings.width < 64 || settings.width > 8192 || settings.width % 16 !== 0) errors.push("Width must be a multiple of 16 from 64 to 8192.");
+  if (!Number.isInteger(settings.height) || settings.height < 64 || settings.height > 8192 || settings.height % 16 !== 0) errors.push("Height must be a multiple of 16 from 64 to 8192.");
+  if (!Number.isInteger(duration) || duration < 1 || duration > 20) errors.push("Duration must be a whole number from 1 to 20 seconds.");
   if (!Number.isFinite(settings.fps) || settings.fps < 1 || settings.fps > 120) errors.push("FPS must be from 1 to 120.");
   if (!Number.isSafeInteger(settings.seed) || settings.seed < 0) errors.push("Seed must be a non-negative safe integer.");
   if (!Number.isInteger(settings.steps) || settings.steps < 1 || settings.steps > 200) errors.push("Steps must be from 1 to 200.");
@@ -122,8 +126,102 @@ export function validateJobSettings(settings: JobSettings, duration: number) {
   if (!Number.isFinite(settings.shiftAudio)) errors.push("shift_audio must be a finite number.");
   if (settings.refImageSize !== "match" && settings.refImageSize !== "max") errors.push("Reference image size must be match or max.");
   if (!DIRECTOR_INPUT_SCALING_VALUES.has(settings.inputScaling)) errors.push("Input scaling must be one of Director's supported modes.");
-  if (!Number.isFinite(settings.outputQuality) || settings.outputQuality < 0 || settings.outputQuality > 51) errors.push("Video quality (CRF/CQ) must be from 0 to 51; lower values preserve more quality.");
+  if (!Number.isInteger(settings.outputQuality) || settings.outputQuality < 0 || settings.outputQuality > 51) errors.push("Video quality (CRF/CQ) must be a whole number from 0 to 51; lower values preserve more quality.");
   if (!settings.sampler.trim()) errors.push("Sampler is required.");
+  if (!settings.outputContainer.trim()) errors.push("Output container is required.");
+  if (!settings.outputCodec.trim()) errors.push("Output codec is required.");
+  if (!settings.audioCodec.trim()) errors.push("Audio codec is required.");
+  if (!settings.audioBitrate.trim()) errors.push("Audio bitrate is required.");
+  return errors;
+}
+
+function expectedReferenceLabel(kind: AssetRecord["kind"], index: number) {
+  return `<${kind === "image" ? "Picture" : kind === "video" ? "Video" : "Audio"} ${index}>`;
+}
+
+/**
+ * Validate the sealed v2 manifest independently of the editor UI. Unit05 is
+ * expected to enforce the same rules before staging any file into ComfyUI.
+ */
+export function validateManifestV2(manifest: unknown) {
+  const errors: string[] = [];
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return ["Manifest must be an object."];
+  const value = manifest as Record<string, unknown>;
+  if (value.schema !== DUMMYPLUG_JOB_SCHEMA) errors.push(`Schema must be ${DUMMYPLUG_JOB_SCHEMA}.`);
+  if (!JOB_ID_PATTERN.test(String(value.job_id ?? ""))) errors.push("job_id is missing or unsafe.");
+  const jobDesc = String(value.job_desc ?? "").trim();
+  if (!jobDesc || jobDesc.length > 30) errors.push("job_desc must contain 1 to 30 characters.");
+  if (typeof value.created_at !== "string" || !Number.isFinite(Date.parse(value.created_at))) errors.push("created_at must be an ISO-8601 timestamp.");
+
+  const workflow = value.workflow as Record<string, unknown> | undefined;
+  if (!workflow || workflow.template !== "dasiwa-ref2va" || workflow.version !== 1) errors.push("workflow must be dasiwa-ref2va version 1.");
+  const promptPolicy = value.prompt_policy as Record<string, unknown> | undefined;
+  const vocabulary = promptPolicy?.allowedVocabulary as Record<string, unknown> | undefined;
+  if (!promptPolicy || typeof promptPolicy.allCharactersTransgenderWomen !== "boolean" || !vocabulary || ["man", "woman", "trans", "futa"].some((key) => typeof vocabulary[key] !== "boolean")) errors.push("prompt_policy must contain the cast-lock boolean and all four vocabulary booleans.");
+  const generation = value.generation as Record<string, unknown> | undefined;
+  if (!generation) errors.push("generation must be an object.");
+  else {
+    const output = generation.output && typeof generation.output === "object" && !Array.isArray(generation.output) ? generation.output as Record<string, unknown> : {};
+    const stringField = (field: unknown) => typeof field === "string" ? field : "";
+    const settings = {
+      ...DEFAULT_JOB_SETTINGS,
+      width: Number(generation.width),
+      height: Number(generation.height),
+      fps: Number(generation.fps),
+      seed: Number(generation.seed),
+      steps: Number(generation.steps),
+      sampler: stringField(generation.sampler),
+      shiftVideo: Number(generation.shift_video),
+      shiftAudio: Number(generation.shift_audio),
+      refImageSize: stringField(generation.ref_image_size),
+      inputScaling: stringField(generation.input_scaling),
+      outputContainer: stringField(output.container),
+      outputCodec: stringField(output.codec),
+      outputQuality: Number(output.quality),
+      audioCodec: stringField(output.audio_codec),
+      audioBitrate: stringField(output.audio_bitrate),
+    } as JobSettings;
+    errors.push(...validateJobSettings(settings, Number(generation.duration)));
+  }
+
+  const references = value.references;
+  if (!Array.isArray(references) || references.length === 0) errors.push("At least one reference is required.");
+  else {
+    const paths = new Set<string>();
+    const assetIds = new Set<string>();
+    const counters: Record<AssetRecord["kind"], number> = { image: 0, video: 0, audio: 0 };
+    references.forEach((raw, index) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) { errors.push(`Reference ${index} must be an object.`); return; }
+      const reference = raw as Record<string, unknown>;
+      const kind = reference.kind as AssetRecord["kind"];
+      if (!(["image", "video", "audio"] as string[]).includes(kind)) { errors.push(`Reference ${index} has an unsupported kind.`); return; }
+      counters[kind] += 1;
+      if (reference.order !== index) errors.push(`Reference ${index} order must equal its zero-based array position.`);
+      if (reference.label !== expectedReferenceLabel(kind, counters[kind])) errors.push(`Reference ${index} has an invalid H3 label.`);
+      const assetId = String(reference.asset_id ?? "").trim();
+      if (!assetId) errors.push(`Reference ${index} asset_id is required.`);
+      if (assetIds.has(assetId)) errors.push(`Reference ${index} asset_id is duplicated.`);
+      assetIds.add(assetId);
+      const path = String(reference.path ?? "");
+      if (!/^assets\/[A-Za-z0-9._-]+$/.test(path) || path.includes("..") || path.includes("\\")) errors.push(`Reference ${index} path must be a safe POSIX path directly inside assets/.`);
+      if (paths.has(path)) errors.push(`Reference ${index} path is duplicated.`);
+      paths.add(path);
+      if (!SHA256_PATTERN.test(String(reference.sha256 ?? ""))) errors.push(`Reference ${index} sha256 must be lowercase hexadecimal.`);
+      if (!Number.isSafeInteger(reference.size) || Number(reference.size) < 0) errors.push(`Reference ${index} size must be a non-negative safe integer.`);
+      if (!String(reference.mime_type ?? "").trim()) errors.push(`Reference ${index} mime_type is required.`);
+      if (kind !== "audio") {
+        if (!Number.isInteger(reference.source_width) || Number(reference.source_width) <= 0) errors.push(`Reference ${index} source_width must be a positive integer.`);
+        if (!Number.isInteger(reference.source_height) || Number(reference.source_height) <= 0) errors.push(`Reference ${index} source_height must be a positive integer.`);
+      }
+      if (kind === "video") {
+        const sourceDuration = Number(reference.source_duration);
+        const trimStart = Number(reference.trim_start);
+        const trimEnd = Number(reference.trim_end);
+        if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) errors.push(`Reference ${index} source_duration must be positive.`);
+        if (!Number.isFinite(trimStart) || !Number.isFinite(trimEnd) || trimStart < 0 || trimEnd <= trimStart || trimEnd > sourceDuration + 0.000001) errors.push(`Reference ${index} video trim must satisfy 0 <= trim_start < trim_end <= source_duration.`);
+      } else if ("trim_start" in reference || "trim_end" in reference) errors.push(`Reference ${index} contains video-only trim fields.`);
+    });
+  }
   return errors;
 }
 
@@ -150,6 +248,13 @@ export async function sealJobZip(input: SealJobInput) {
   const errors = [
     ...validateJobSettings(input.settings, input.duration),
     ...input.assets.map(validateVideoTrim).filter((error): error is string => Boolean(error)),
+    ...input.assets.flatMap((asset) => {
+      const metadataErrors: string[] = [];
+      if (!asset.mimeType.trim()) metadataErrors.push(`${asset.name}: MIME type is required.`);
+      if (asset.kind !== "audio" && (!Number.isInteger(asset.sourceWidth) || Number(asset.sourceWidth) <= 0 || !Number.isInteger(asset.sourceHeight) || Number(asset.sourceHeight) <= 0)) metadataErrors.push(`${asset.name}: source width and height are required before sealing.`);
+      if (asset.kind === "video" && (!Number.isFinite(asset.sourceDuration) || Number(asset.sourceDuration) <= 0)) metadataErrors.push(`${asset.name}: source duration is required before sealing.`);
+      return metadataErrors;
+    }),
     ...compiled.warnings,
   ];
   const promptValidation = validateSingleShotPrompt(input.prompt, compiled.attachments, input.subjects);
@@ -201,7 +306,7 @@ export async function sealJobZip(input: SealJobInput) {
 
   const [template, versionText] = input.settings.workflowPreset.split(":v");
   const manifest = {
-    schema: "dummyplug.h3-job.v2",
+    schema: DUMMYPLUG_JOB_SCHEMA,
     job_id: jobId,
     job_desc: input.jobDesc?.trim() || input.settings.title.trim() || "untitled job",
     created_at: createdAt,
@@ -230,6 +335,8 @@ export async function sealJobZip(input: SealJobInput) {
     },
     references,
   };
+  const manifestErrors = validateManifestV2(manifest);
+  if (manifestErrors.length) throw new Error(manifestErrors.join(" "));
   const referenceMap = { subjects: input.subjects, attachments: compiled.attachments };
   files.set("manifest.json", await bytesOf(JSON.stringify(manifest, null, 2)));
   files.set("prompt.txt", await bytesOf(input.prompt));
@@ -239,8 +346,9 @@ export async function sealJobZip(input: SealJobInput) {
   const checksums: Record<string, string> = {};
   for (const [path, bytes] of files) checksums[path] = await sha256Hex(bytes);
   const zip = new JSZip();
-  for (const [path, bytes] of files) zip.file(path, bytes);
-  zip.file("checksums.json", JSON.stringify(checksums, null, 2));
+  const archiveDate = new Date(2000, 0, 1, 0, 0, 0);
+  for (const [path, bytes] of files) zip.file(path, bytes, { date: archiveDate, createFolders: false });
+  zip.file("checksums.json", JSON.stringify(checksums, null, 2), { date: archiveDate, createFolders: false });
   return {
     bytes: await zip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } }),
     jobId,
