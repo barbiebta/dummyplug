@@ -1,6 +1,5 @@
 import JSZip from "jszip";
-import { compileAttachments, hasNonDiegeticMusicNA, validateSingleShotPrompt } from "./single-h3.ts";
-import { validateCharacterPolicy } from "./character-policy.ts";
+import { compileAttachments } from "./single-h3.ts";
 import { DIRECTOR_INPUT_SCALING_OPTIONS } from "./types.ts";
 import type { AssetRecord, JobSettings, SubjectSpec } from "./types.ts";
 
@@ -246,6 +245,7 @@ export async function sha256Hex(source: BinarySource | string) {
 export async function sealJobZip(input: SealJobInput) {
   const compiled = compileAttachments(input.assets);
   const errors = [
+    ...(!input.prompt.trim() ? ["The final H3 prompt is empty."] : []),
     ...validateJobSettings(input.settings, input.duration),
     ...input.assets.map(validateVideoTrim).filter((error): error is string => Boolean(error)),
     ...input.assets.flatMap((asset) => {
@@ -257,14 +257,6 @@ export async function sealJobZip(input: SealJobInput) {
     }),
     ...compiled.warnings,
   ];
-  const promptValidation = validateSingleShotPrompt(input.prompt, compiled.attachments, input.subjects);
-  if (!promptValidation.valid) errors.push("The six-section H3 prompt is not valid for the current reference snapshot.");
-  const characterValidation = validateCharacterPolicy(input.prompt, input.subjects, input.settings.characterPolicy);
-  if (!characterValidation.valid) {
-    if (characterValidation.forbiddenVocabulary.length) errors.push(`Final prompt uses disallowed character vocabulary: ${characterValidation.forbiddenVocabulary.map((item) => item.terms.join(", ")).join("; ")}.`);
-    if (characterValidation.missingCastIdentity.length) errors.push(`Cast lock identity is missing from: ${characterValidation.missingCastIdentity.join(", ")}.`);
-  }
-  if (input.requireNonDiegeticMusicNA && !hasNonDiegeticMusicNA(input.prompt)) errors.push("non_diegetic_music must be N/A while the job checkbox is on.");
   for (const asset of input.assets) if (!input.files.has(asset.id)) errors.push(`${asset.name}: source file is not loaded.`);
   if (errors.length) throw new Error(errors.join(" "));
 

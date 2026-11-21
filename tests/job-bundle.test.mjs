@@ -105,7 +105,7 @@ test("video trim validation enforces known source duration", () => {
   assert.match(validateVideoTrim({ ...assets[2], trimEnd: 12 }), /exceeds source duration/);
 });
 
-test("the no-music checkbox blocks sealing unless the final section is N/A", async () => {
+test("manual prompts are not blocked by the no-music authoring hint", async () => {
   const compiled = compileAttachments(assets);
   const input = {
     assets,
@@ -118,11 +118,11 @@ test("the no-music checkbox blocks sealing unless the final section is N/A", asy
     subjects: compiled.subjects,
     requireNonDiegeticMusicNA: true,
   };
-  await assert.rejects(sealJobZip(input), /non_diegetic_music must be N\/A/);
+  await assert.doesNotReject(sealJobZip(input));
   await assert.doesNotReject(sealJobZip({ ...input, requireNonDiegeticMusicNA: false }));
 });
 
-test("cast policy blocks sealing when a character Subject omits its required identity", async () => {
+test("manual prompts are not blocked by cast-policy wording", async () => {
   const characterAssets = assets.map((asset, index) => index === 0 ? { ...asset, role: "character", declaredIdentity: "" } : asset);
   const compiled = compileAttachments(characterAssets);
   const input = {
@@ -131,8 +131,23 @@ test("cast policy blocks sealing when a character Subject omits its required ide
     sidecars: new Map(), prompt: validPrompt(), request: "one take", duration: 5,
     settings: DEFAULT_JOB_SETTINGS, subjects: compiled.subjects,
   };
-  await assert.rejects(sealJobZip(input), /Cast lock identity is missing/);
+  await assert.doesNotReject(sealJobZip(input));
   await assert.doesNotReject(sealJobZip({ ...input, prompt: validPrompt().replace("<Subject 1> is Rabbit", "<Subject 1> is a transgender woman named Rabbit") }));
+});
+
+test("an arbitrary nonempty manual prompt seals without six-section validation", async () => {
+  const compiled = compileAttachments(assets);
+  await assert.doesNotReject(sealJobZip({
+    assets,
+    files: new Map(assets.map((asset, index) => [asset.id, new Uint8Array([index, 7, 8, 9])])),
+    sidecars: new Map(),
+    prompt: "Rabbit looks out the window and thinks for a while.",
+    request: "manual prompt",
+    duration: 5,
+    settings: DEFAULT_JOB_SETTINGS,
+    subjects: compiled.subjects,
+    requireNonDiegeticMusicNA: true,
+  }));
 });
 
 test("a randomized seed is resolved into the sealed manifest", async () => {
